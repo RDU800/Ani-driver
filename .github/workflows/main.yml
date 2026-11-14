@@ -146,30 +146,40 @@ jobs:
         run: |
           TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
           SHA=$(git rev-parse --short=10 HEAD)
-          for V in A B; do
-            mkdir -p out$V
-            "$TC/llvm-strip" -o out$V/libvulkan_panfrost.so build-android/src/libvulkan_malisx2.so
+          for V in main t2meta; do
+            mkdir -p out-$V
+            "$TC/llvm-strip" -o out-$V/libvulkan_panfrost.so build-android/src/libvulkan_malisx2.so
           done
-          python3 - "$SHA" <<'PY'
+          python3 - "$SHA" "${{ github.run_number }}" <<'PY'
           import json, sys
-          sha = sys.argv[1]
-          def meta(name):
-              return {
-                  "schemaVersion": 1,
-                  "name": name,
-                  "description": "malisx-pc: malisx2 fork for Mali-G52 (v7) PC/DXVK work. Not Mesa PanVK.",
-                  "author": "malisx-pc (fork of malisx2 by bmdhacks)",
-                  "packageVersion": "0.5.0-pc1+" + sha,
-                  "vendor": "malisx-pc",
-                  "driverVersion": "44.1.0",
-                  "minApi": 29,
-                  "libraryName": "libvulkan_panfrost.so",
-              }
-          json.dump(meta("malisx-pc 0.5.0-pc1 (" + sha + ")"), open("outA/meta.json", "w"), indent=2)
-          json.dump(meta("PanVK-malisx-pc 0.5.0-pc1 (" + sha + ")"), open("outB/meta.json", "w"), indent=2)
+          sha, run = sys.argv[1], sys.argv[2]
+          base = {
+              "schemaVersion": 1,
+              "vendor": "Mesa",
+              "driverVersion": "Vulkan 1.1.366",
+              "minApi": 31,
+              "libraryName": "libvulkan_panfrost.so",
+          }
+          main = dict(base)
+          main.update({
+              "name": "malisx-pc 0.5.0-pc1 (" + sha + ")",
+              "description": "malisx-pc: malisx2 fork for Mali-G52 (v7) PC/DXVK work.",
+              "author": "malisx-pc (fork of malisx2 by bmdhacks)",
+              "packageVersion": run,
+          })
+          json.dump(main, open("out-main/meta.json", "w"), indent=2)
+          t2 = dict(base)
+          t2.update({
+              "driverVersion": "Vulkan 1.3.363",
+              "name": "LOADER-TEST malisx2 lib",
+              "description": "LOADER TEST ONLY: malisx2 library in Jim-style metadata",
+              "author": "malisx-pc loader test",
+              "packageVersion": "11",
+          })
+          json.dump(t2, open("out-t2meta/meta.json", "w"), indent=2)
           PY
-          (cd outA && zip -9 "../malisx-pc-0.5.0-pc1-$SHA-A.zip" libvulkan_panfrost.so meta.json)
-          (cd outB && zip -9 "../malisx-pc-0.5.0-pc1-$SHA-B-panvk-name.zip" libvulkan_panfrost.so meta.json)
+          (cd out-main && zip -9 "../malisx-pc-0.5.0-pc1-$SHA.zip" libvulkan_panfrost.so meta.json)
+          (cd out-t2meta && zip -9 "../malisx-pc-0.5.0-pc1-$SHA-t2meta.zip" libvulkan_panfrost.so meta.json)
           sha256sum malisx-pc-*.zip | tee SHA256SUMS.txt
 
       - name: Publish release (flat zips)
@@ -179,4 +189,4 @@ jobs:
           gh release create "build-${{ github.run_number }}" \
             malisx-pc-*.zip SHA256SUMS.txt \
             --prerelease --title "malisx-pc build ${{ github.run_number }}" \
-            --notes "Install a flat zip directly. A = normal name, B = name starting with PanVK. Commit $GITHUB_SHA."
+            --notes "Install a flat zip directly. Main zip first; the t2meta zip is the fallback. Commit $GITHUB_SHA."
