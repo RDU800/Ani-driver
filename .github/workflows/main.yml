@@ -54,16 +54,12 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
           ls "$ANDROID_HOME/ndk/$NDK_VERSION"
 
-      - name: Configure
+       - name: Configure
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          cat > ndk-override.ini <<EOT
-          [constants]
-          ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'
-          EOT
-          sed -i 's/^ *//' ndk-override.ini
-          meson setup build-android \
-            --cross-file ndk-override.ini --cross-file cross/android-aarch64.ini
+          sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
+          grep '^ndk' cross-ci.ini
+          meson setup build-android --cross-file cross-ci.ini
 
       - name: Build
         run: |
