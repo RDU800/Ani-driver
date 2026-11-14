@@ -1,4 +1,4 @@
-name: build-malisx-pc
+name: build-anis-emulator-panvk
 
 on:
   workflow_dispatch: {}
@@ -8,6 +8,8 @@ permissions:
 
 env:
   NDK_VERSION: 28.2.13676358
+  DRIVER_NAME: "Ani's emulator panvk"
+  ZIP_SLUG: "anis-emulator-panvk"
   BUILD_NO: "1"
 
 jobs:
@@ -19,7 +21,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch 1 - nested vkMapMemory and build name
+      - name: Patch 1 - nested vkMapMemory and build label
         run: |
           python3 - <<'PY'
           import os, sys
@@ -32,13 +34,13 @@ jobs:
           old = "version : '0.5.0',"
           if old not in s:
               fail(p)
-          open(p, "w").write(s.replace(old, "version : 'pc-build" + os.environ["BUILD_NO"] + "',", 1))
+          open(p, "w").write(s.replace(old, "version : 'ani-build" + os.environ["BUILD_NO"] + "',", 1))
           print("patched:", p)
 
           p = "src/vk/mali_memory.h"
           s = open(p).read()
           old = L("   void *map;", "", "   /* The range [lo, hi) ever mapped")
-          new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (malisx pc). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
+          new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (Ani's emulator panvk). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
           if old not in s:
               fail(p)
           open(p, "w").write(s.replace(old, new, 1))
@@ -49,7 +51,7 @@ jobs:
           edits = [
               (L("   if (mem->map)",
                  '      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "memory is already mapped");'),
-               "   /* malisx pc: a nested vkMapMemory is tolerated (see map_count). */"),
+               "   /* Ani's panvk: a nested vkMapMemory is tolerated (see map_count). */"),
               (L("      dmabuf_sync(mem, DMA_BUF_SYNC_START);",
                  "      base = mem->dmabuf_map;"),
                L("      if (!mem->map)",
@@ -85,17 +87,16 @@ jobs:
           print("patched:", p)
           PY
 
-      - name: Patch 2 - log file helper & Core Affinity Pinning
+      - name: Patch 2 - opt-in log of unimplemented calls
         run: |
           python3 - <<'PY'
           import os, sys
           build = os.environ["BUILD_NO"]
-          header = r'''/* malisx pc: file log, call trace, and A75 core affinity helper. */
+          header = r'''/* Ani's emulator panvk: optional log file. Header only.
+           * Nothing is written unless /sdcard/Download/anis-panvk.log already exists. */
           #ifndef MALI_PC_TRACE_H
           #define MALI_PC_TRACE_H
 
-          #define _GNU_SOURCE
-          #include <sched.h>
           #include <stdarg.h>
           #include <stdio.h>
           #include <unistd.h>
@@ -104,11 +105,13 @@ jobs:
           mali_pc_filelog(const char *line)
           {
              static const char *const paths[] = {
-                "/sdcard/Download/malisx-pc.log",
-                "/storage/emulated/0/Download/malisx-pc.log",
-                "/data/local/tmp/malisx-pc.log",
+                "/sdcard/Download/anis-panvk.log",
+                "/storage/emulated/0/Download/anis-panvk.log",
+                "/data/local/tmp/anis-panvk.log",
              };
              for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+                if (access(paths[i], W_OK) != 0)
+                   continue;
                 FILE *f = fopen(paths[i], "a");
                 if (!f)
                    continue;
@@ -116,27 +119,6 @@ jobs:
                 fclose(f);
                 return;
              }
-          }
-
-          static inline void __attribute__((format(printf, 1, 2)))
-          mali_pc_trace(const char *fmt, ...)
-          {
-             char buf[512];
-             va_list ap;
-             va_start(ap, fmt);
-             vsnprintf(buf, sizeof(buf), fmt, ap);
-             va_end(ap);
-             mali_pc_filelog(buf);
-          }
-
-          static inline void
-          mali_pc_pin_to_performance_cores(void)
-          {
-             cpu_set_t cpuset;
-             CPU_ZERO(&cpuset);
-             CPU_SET(6, &cpuset);
-             CPU_SET(7, &cpuset);
-             sched_setaffinity(0, sizeof(cpuset), &cpuset);
           }
 
           #endif
@@ -166,7 +148,6 @@ jobs:
           static void __attribute__((constructor))
           mali_pc_loaded(void)
           {
-             mali_pc_pin_to_performance_cores();
              char cmd[256] = "?";
              FILE *f = fopen("/proc/self/cmdline", "r");
              if (f) {
@@ -175,7 +156,7 @@ jobs:
                 fclose(f);
              }
              char line[400];
-             snprintf(line, sizeof(line), "malisx pc build BUILDNO pinned to A75 cores and loaded in %s", cmd);
+             snprintf(line, sizeof(line), "Ani emulator panvk build BUILDNO loaded in %s", cmd);
              mali_pc_filelog(line);
           }
           '''.replace("BUILDNO", build)
@@ -187,221 +168,7 @@ jobs:
           open(p, "w").write(head + marker + helper + tail)
           print("patched:", p)
           PY
-
-      - name: Patch 3 - call trace
-        run: |
-          python3 - <<'PY'
-          import sys
-          def fail(p):
-              sys.exit("PATCH FAILED: expected text not found in " + p)
-          def add_include(s, p):
-              k = s.find('#include "')
-              if k < 0:
-                  fail(p)
-              return s[:k] + '#include "mali_pc_trace.h"\n' + s[k:]
-
-          # vkCreateInstance
-          p = "src/vk/mali_instance.c"
-          s = open(p).read()
-          old = "VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,"
-          new = "static VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateInstance_impl(const VkInstanceCreateInfo *pCreateInfo,"
-          if old not in s:
-              fail(p)
-          s = add_include(s.replace(old, new, 1), p)
-          s += r'''
-          VKAPI_ATTR VkResult VKAPI_CALL
-          mali_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
-                              const VkAllocationCallbacks *pAllocator,
-                              VkInstance *pInstance)
-          {
-             mali_pc_trace("vkCreateInstance: enter, apiVersion 0x%x, %u extensions",
-                           pCreateInfo->pApplicationInfo ? pCreateInfo->pApplicationInfo->apiVersion : 0u,
-                           pCreateInfo->enabledExtensionCount);
-             for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
-                mali_pc_trace("  instance extension: %s", pCreateInfo->ppEnabledExtensionNames[i]);
-             VkResult r = mali_CreateInstance_impl(pCreateInfo, pAllocator, pInstance);
-             mali_pc_trace("vkCreateInstance: result %d", (int)r);
-             return r;
-          }
-          '''.replace("\n          ", "\n")
-          open(p, "w").write(s)
-          print("patched:", p)
-
-          # physical device enumeration
-          p = "src/vk/mali_physical_device.c"
-          s = open(p).read()
-          edits = [
-              ("   struct mali_instance *instance = container_of(vk_instance, struct mali_instance, vk);\n   const bool os_backend",
-               "   struct mali_instance *instance = container_of(vk_instance, struct mali_instance, vk);\n   mali_pc_trace(\"enumerate physical devices: enter\");\n   const bool os_backend"),
-              ("      VkResult result = physical_device_create(instance, path, &pdev);\n",
-               "      VkResult result = physical_device_create(instance, path, &pdev);\n      mali_pc_trace(\"physical_device_create(%s) -> %d\", path, (int)result);\n"),
-              ("   }\n   return VK_SUCCESS;\n}\n\nvoid\nmali_physical_device_destroy(",
-               "   }\n   mali_pc_trace(\"enumerate physical devices: done\");\n   return VK_SUCCESS;\n}\n\nvoid\nmali_physical_device_destroy("),
-          ]
-          for old, new in edits:
-              if old not in s:
-                  fail(p)
-              s = s.replace(old, new, 1)
-          open(p, "w").write(add_include(s, p))
-          print("patched:", p)
-
-          # vkCreateDevice
-          p = "src/vk/mali_device.c"
-          s = open(p).read()
-          old = "VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateDevice(VkPhysicalDevice physicalDevice,"
-          new = "static VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateDevice_impl(VkPhysicalDevice physicalDevice,"
-          if old not in s:
-              fail(p)
-          s = add_include(s.replace(old, new, 1), p)
-          s += r'''
-          VKAPI_ATTR VkResult VKAPI_CALL
-          mali_CreateDevice(VkPhysicalDevice physicalDevice,
-                            const VkDeviceCreateInfo *pCreateInfo,
-                            const VkAllocationCallbacks *pAllocator,
-                            VkDevice *pDevice)
-          {
-             mali_pc_trace("vkCreateDevice: enter, %u extensions", pCreateInfo->enabledExtensionCount);
-             for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
-                mali_pc_trace("  device extension: %s", pCreateInfo->ppEnabledExtensionNames[i]);
-             VkResult r = mali_CreateDevice_impl(physicalDevice, pCreateInfo, pAllocator, pDevice);
-             mali_pc_trace("vkCreateDevice: result %d", (int)r);
-             return r;
-          }
-          '''.replace("\n          ", "\n")
-          open(p, "w").write(s)
-          print("patched:", p)
-          PY
-
-      - name: Patch 4 - extensions
-        run: |
-          python3 - <<'PY'
-          import sys
-          p = "src/vk/mali_physical_device.c"
-          s = open(p).read()
-          edits = [
-              ("static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n",
-               "static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n   /* malisx pc: mirror-clamp is handled in mali_sampler.c; the divisor is\n    * applied by the v7 draw code (b->divisor). */\n   .KHR_sampler_mirror_clamp_to_edge = true,\n   .EXT_vertex_attribute_divisor = true,\n"),
-              ("   *f = (struct vk_features) {\n",
-               "   *f = (struct vk_features) {\n      /* malisx pc: VK_EXT_vertex_attribute_divisor. Zero divisor stays off. */\n      .vertexAttributeInstanceRateDivisor = true,\n      .vertexAttributeInstanceRateZeroDivisor = false,\n"),
-              ("   *props = (struct vk_properties) {\n",
-               "   *props = (struct vk_properties) {\n      .maxVertexAttribDivisor = 0xffffffffu,\n"),
-          ]
-          for old, new in edits:
-              if s.count(old) != 1:
-                  sys.exit("PATCH FAILED: anchor found %d times in %s:\n%s" % (s.count(old), p, old))
-              s = s.replace(old, new, 1)
-          open(p, "w").write(s)
-          print("patched:", p)
-          PY
-
-      - name: Patch 5 - Dynamic RAM/VRAM profiler and UMA heap sizing
-        run: |
-          python3 - <<'PY'
-          import sys
-
-          vram_header = r'''/* malisx pc: Boot-time RAM and Vita3K app profiler for UMA VRAM sizing. */
-          #ifndef MALI_PC_VRAM_H
-          #define MALI_PC_VRAM_H
-
-          #include <stdbool.h>
-          #include <stdint.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include "mali_pc_trace.h"
-
-          static uint64_t mali_pc_cached_vram_bytes = 0;
-
-          static inline uint64_t
-          mali_pc_get_total_ram_mb(void)
-          {
-             FILE *f = fopen("/proc/meminfo", "r");
-             if (!f)
-                return 8192;
-             char line[256];
-             uint64_t mem_kb = 0;
-             while (fgets(line, sizeof(line), f)) {
-                if (strncmp(line, "MemTotal:", 9) == 0) {
-                   sscanf(line + 9, "%llu", (unsigned long long *)&mem_kb);
-                   break;
-                }
-             }
-             fclose(f);
-             return mem_kb > 0 ? (mem_kb / 1024ULL) : 8192;
-          }
-
-          static inline uint64_t
-          mali_pc_compute_vram_budget(void)
-          {
-             if (mali_pc_cached_vram_bytes > 0)
-                return mali_pc_cached_vram_bytes;
-
-             uint64_t ram_mb = mali_pc_get_total_ram_mb();
-             char cmd[256] = {0};
-             FILE *f = fopen("/proc/self/cmdline", "r");
-             if (f) {
-                size_t n = fread(cmd, 1, sizeof(cmd) - 1, f);
-                for (size_t i = 0; i < n; i++) {
-                   if (cmd[i] == '\0')
-                      cmd[i] = ' ';
-                }
-                fclose(f);
-             }
-
-             bool is_vita = (strstr(cmd, "vita3k") != NULL || strstr(cmd, "Vita3K") != NULL);
-             uint64_t vram_mb = 1024;
-
-             if (is_vita) {
-                if (ram_mb <= 4600)
-                   vram_mb = 1350;
-                else if (ram_mb <= 9000)
-                   vram_mb = 3072;
-                else
-                   vram_mb = 4608;
-             } else {
-                vram_mb = (ram_mb <= 4600) ? 1024 : 2048;
-             }
-
-             mali_pc_cached_vram_bytes = vram_mb * 1024ULL * 1024ULL;
-             mali_pc_trace("VRAM Profiler: RAM=%llu MB | Vita3K Detected=%d | Heap=%llu MB",
-                           (unsigned long long)ram_mb, (int)is_vita, (unsigned long long)vram_mb);
-             return mali_pc_cached_vram_bytes;
-          }
-
-          #endif
-          '''
-          vram_header = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in vram_header.split("\n"))
-          open("src/vk/mali_pc_vram.h", "w").write(vram_header)
-
-          p_pdev = "src/vk/mali_physical_device.c"
-          s_pdev = open(p_pdev).read()
-          s_pdev = '#include "mali_pc_vram.h"\n' + s_pdev
-
-          old_mem_fn = "VKAPI_ATTR void VKAPI_CALL\nmali_GetPhysicalDeviceMemoryProperties2("
-          new_mem_fn = "static VKAPI_ATTR void VKAPI_CALL\nmali_GetPhysicalDeviceMemoryProperties2_impl("
-          if old_mem_fn not in s_pdev:
-              sys.exit("PATCH FAILED: mali_GetPhysicalDeviceMemoryProperties2 not found in " + p_pdev)
-
-          s_pdev = s_pdev.replace(old_mem_fn, new_mem_fn, 1)
-          s_pdev += r'''
-          VKAPI_ATTR void VKAPI_CALL
-          mali_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
-                                                  VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
-          {
-             mali_GetPhysicalDeviceMemoryProperties2_impl(physicalDevice, pMemoryProperties);
-             uint64_t target_vram = mali_pc_compute_vram_budget();
-             VkPhysicalDeviceMemoryProperties *props = &pMemoryProperties->memoryProperties;
-             for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
-                if (props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
-                   props->memoryHeaps[i].size = target_vram;
-                }
-             }
-          }
-          '''.replace("\n          ", "\n")
-
-          open(p_pdev, "w").write(s_pdev)
-          print("patched:", p_pdev)
-          PY
+          git status --short
 
       - name: Fetch pinned Mesa
         run: |
@@ -439,52 +206,83 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
           ls "$ANDROID_HOME/ndk/$NDK_VERSION"
 
-      - name: Configure with Maximum Performance & Fast-Math Flags
+      - name: Configure
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
-          
-          python3 -c "
-          with open('cross-ci.ini', 'r') as f:
-              c = f.read()
-          if 'PAN_FORCE_IDVS' not in c:
-              c = c.replace('c_args = [', \"c_args = ['-O3', '-ffast-math', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1', \")
-              c = c.replace('cpp_args = [', \"cpp_args = ['-O3', '-ffast-math', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1', \")
-          with open('cross-ci.ini', 'w') as f:
-              f.write(c)
-          "
-          
-          meson setup build-android --cross-file cross-ci.ini --buildtype=release
+          grep '^ndk' cross-ci.ini
+          meson setup build-android --cross-file cross-ci.ini
 
       - name: Build
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           ninja -C build-android
 
-      - name: Package flat driver zips
+      - name: Verify the built library
+        run: |
+          SO=build-android/src/libvulkan_malisx2.so
+          test -f "$SO" || { echo "FAIL: $SO not found"; exit 1; }
+          TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          RE="$TC/llvm-readelf"
+          NM="$TC/llvm-nm"
+          FAIL=0
+          "$RE" -h "$SO" | grep -q "AArch64" || { echo "FAIL: not an AArch64 library"; FAIL=1; }
+          NEEDED=$("$RE" -d "$SO" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | tr '\n' ' ')
+          echo "needed libraries: $NEEDED"
+          for lib in $NEEDED; do
+            case "$lib" in
+              liblog.so|libm.so|libdl.so|libc.so) ;;
+              *) echo "FAIL: unexpected dependency $lib"; FAIL=1 ;;
+            esac
+          done
+          EXPORTS=$("$NM" -D --defined-only "$SO" | awk '{print $3}' | sort | tr '\n' ' ')
+          echo "exports: $EXPORTS"
+          for sym in HMI vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion; do
+            echo "$EXPORTS" | grep -qw "$sym" || { echo "FAIL: missing export $sym"; FAIL=1; }
+          done
+          strings -n 6 "$SO" | grep -q "ani-build$BUILD_NO" || { echo "FAIL: build label ani-build$BUILD_NO not found in the library"; FAIL=1; }
+          [ "$FAIL" = 0 ] && echo "VERIFY OK" || exit 1
+
+      - name: Package flat driver zip
         run: |
           TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          
-          SO_FILE=$(find build-android -name "libvulkan_*.so" | head -n 1)
-          if [ -z "$SO_FILE" ]; then
-             echo "ERROR: Compiled Vulkan shared library not found!"
-             exit 1
-          fi
-          echo "Found compiled library at: $SO_FILE"
-
-          mkdir -p out-main out-fallback
-          "$TC/llvm-strip" -o out-main/libvulkan_panfrost.so "$SO_FILE"
-          "$TC/llvm-strip" -o out-fallback/libvulkan_panfrost.so "$SO_FILE"
-
+          mkdir -p out
+          "$TC/llvm-strip" -o out/libvulkan_malisx2.so build-android/src/libvulkan_malisx2.so
           python3 - <<'PY'
           import json, os
           b = os.environ["BUILD_NO"]
-          main_data = {
+          n = os.environ["DRIVER_NAME"]
+          meta = {
               "schemaVersion": 1,
-              "vendor": "Mesa",
-              "driverVersion": "Vulkan 1.3.363",
-              "minApi": 31,
-              "libraryName": "libvulkan_panfrost.so",
-              "name": "malisx pc build " + b,
-              "description": "malisx pc build " + b + ": Optimized Mali-G52 driver with A75 affinity + Fast-Math",
-              "autho
+              "name": n + " build " + b,
+              "description": n + " build " + b + ": malisx2-based Vulkan driver for Mali (kbase), for emulators",
+              "author": n + " (fork of malisx2 by bmdhacks)",
+              "packageVersion": b,
+              "vendor": n,
+              "driverVersion": "44.1.0",
+              "minApi": 29,
+              "libraryName": "libvulkan_malisx2.so",
+          }
+          json.dump(meta, open("out/meta.json", "w"), indent=2)
+          PY
+          ZIP="$ZIP_SLUG-build-$BUILD_NO.zip"
+          (cd out && zip -9 "../$ZIP" libvulkan_malisx2.so meta.json)
+          sha256sum "$ZIP" | tee SHA256SUMS.txt
+          {
+            echo "## $DRIVER_NAME build $BUILD_NO"
+            echo ""
+            echo "- zip: \`$ZIP\` ($(du -h "$ZIP" | cut -f1))"
+            echo "- sha256: \`$(sha256sum "$ZIP" | cut -d' ' -f1)\`"
+            echo "- library check: passed (aarch64, only liblog/libm/libdl/libc, loader exports present, build label stamped)"
+            echo "- patches: nested vkMapMemory tolerated; optional log file (off unless Download/anis-panvk.log exists)"
+            echo "- source commit: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$ZIP_SLUG-build-$BUILD_NO-run${{ github.run_number }}" \
+            "$ZIP_SLUG-build-$BUILD_NO.zip" SHA256SUMS.txt \
+            --prerelease --title "$DRIVER_NAME build $BUILD_NO" \
+            --notes "Install the zip as it is. To log calls the driver does not implement, create an empty file Download/anis-panvk.log before starting the emulator. Commit $GITHUB_SHA."
