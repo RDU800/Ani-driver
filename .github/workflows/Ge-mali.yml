@@ -42,7 +42,7 @@ jobs:
       - name: Checkout Repository (Patches & Configs)
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies & Python Pip
+      - name: Install System Dependencies & Global Meson
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -50,8 +50,7 @@ jobs:
             clang llvm-18-dev libclang-18-dev spirv-tools glslang-tools \
             libdrm-dev libelf-dev flex bison zip unzip wget git pkg-config \
             patchelf rustc cargo
-          python3 -m pip install --upgrade pip
-          python3 -m pip install --no-cache-dir meson>=1.7.0
+          sudo pip3 install --break-system-packages --no-cache-dir "meson>=1.7.0"
           rustup target add aarch64-linux-android
 
       - name: Download & Extract Android NDK
@@ -116,11 +115,10 @@ jobs:
 
       - name: Configure PanVK for Android (mali_kbase)
         run: |
-          python3 -m meson setup build-android mesa-src \
+          meson setup build-android mesa-src \
             --cross-file android-aarch64.txt \
             --buildtype=${{ github.event.inputs.build_type || 'release' }} \
             -Dstrip=true \
-            -Dplatforms=android \
             -Dplatform-sdk-version=${{ env.ANDROID_API }} \
             -Dandroid-stub=true \
             -Dgallium-drivers= \
