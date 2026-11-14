@@ -323,9 +323,19 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
           
-          # Inject high-performance optimizations and IDVS geometry handling
-          echo "c_args += ['-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1']" >> cross-ci.ini
-          echo "cpp_args += ['-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1']" >> cross-ci.ini
+          # Safely append performance and geometry flags to the cross-file using Python
+          python3 -c "
+          with open('cross-ci.ini', 'r') as f:
+              content = f.read()
+          
+          # Append flags inside built-in options
+          flags = \"''-O3'', ''-DPAN_FORCE_IDVS=1'', ''-DPAN_FAST_VERTEX_CACHE=1''\"
+          content = content.replace('c_args = [', 'c_args = [' + flags + ', ')
+          content = content.replace('cpp_args = [', 'cpp_args = [' + flags + ', ')
+          
+          with open('cross-ci.ini', 'w') as f:
+              f.write(content)
+          "
           
           grep '^ndk' cross-ci.ini
           meson setup build-android --cross-file cross-ci.ini --buildtype=release
