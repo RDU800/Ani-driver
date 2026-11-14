@@ -42,14 +42,16 @@ jobs:
       - name: Checkout Repository (Patches & Configs)
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies
+      - name: Install System Dependencies & Up-to-date Meson
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            meson ninja-build python3-pip python3-mako python3-yaml python3-ply \
+            ninja-build python3-pip python3-mako python3-yaml python3-ply \
             clang llvm-18-dev libclang-18-dev spirv-tools glslang-tools \
             libdrm-dev libelf-dev flex bison zip unzip wget git pkg-config \
             patchelf rustc cargo
+          pip3 install --upgrade pip
+          pip3 install "meson>=1.7.0"
           rustup target add aarch64-linux-android
 
       - name: Download & Extract Android NDK
