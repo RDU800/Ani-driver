@@ -8,7 +8,7 @@ permissions:
 
 env:
   NDK_VERSION: 28.2.13676358
-  BUILD_NO: "1"
+  BUILD_NO: "${{ github.run_number }}"
 
 jobs:
   android:
@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch 1 - nested vkMapMemory and build name
+      - name: Patch 1 - nested vkMapMemory and dynamic build name
         run: |
           python3 - <<'PY'
           import os, sys
@@ -32,7 +32,7 @@ jobs:
           old = "version : '0.5.0',"
           if old not in s:
               fail(p)
-          open(p, "w").write(s.replace(old, "version : 'pc-build" + os.environ["BUILD_NO"] + "',", 1))
+          open(p, "w").write(s.replace(old, "version : 'pc-build-run" + os.environ["BUILD_NO"] + "',", 1))
           print("patched:", p)
 
           p = "src/vk/mali_memory.h"
@@ -162,7 +162,7 @@ jobs:
                 fclose(f);
              }
              char line[400];
-             snprintf(line, sizeof(line), "malisx pc build BUILDNO loaded in %s", cmd);
+             snprintf(line, sizeof(line), "malisx pc build run-BUILDNO loaded in %s", cmd);
              mali_pc_filelog(line);
           }
           '''.replace("BUILDNO", build)
@@ -318,12 +318,17 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
           ls "$ANDROID_HOME/ndk/$NDK_VERSION"
 
-      - name: Configure
+      - name: Configure with Performance & Geometry flags
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
+          
+          # Inject high-performance optimizations and IDVS geometry handling
+          echo "c_args += ['-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1']" >> cross-ci.ini
+          echo "cpp_args += ['-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1']" >> cross-ci.ini
+          
           grep '^ndk' cross-ci.ini
-          meson setup build-android --cross-file cross-ci.ini
+          meson setup build-android --cross-file cross-ci.ini --buildtype=release
 
       - name: Build
         run: |
@@ -349,8 +354,8 @@ jobs:
           }
           main = dict(base)
           main.update({
-              "name": "malisx pc build " + b,
-              "description": "malisx pc build " + b + ": Mali-G52 driver for PC games and emulators",
+              "name": "malisx pc build run-" + b,
+              "description": "malisx pc build run-" + b + ": Mali-G52 driver optimized for PC games, emulation, and geometry",
               "author": "malisx pc (fork of malisx2 by bmdhacks)",
               "packageVersion": b,
           })
@@ -364,16 +369,16 @@ jobs:
           })
           json.dump(fb, open("out-fallback/meta.json", "w"), indent=2)
           PY
-          (cd out-main && zip -9 "../malisx-pc-build-$BUILD_NO.zip" libvulkan_panfrost.so meta.json)
-          (cd out-fallback && zip -9 "../malisx-pc-build-$BUILD_NO-fallback.zip" libvulkan_panfrost.so meta.json)
+          (cd out-main && zip -9 "../malisx-pc-build-run-$BUILD_NO.zip" libvulkan_panfrost.so meta.json)
+          (cd out-fallback && zip -9 "../malisx-pc-build-run-$BUILD_NO-fallback.zip" libvulkan_panfrost.so meta.json)
           sha256sum malisx-pc-build-*.zip | tee SHA256SUMS.txt
 
       - name: Publish release (flat zips)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "malisx-pc-build-$BUILD_NO-run${{ github.run_number }}" \
+          gh release create "malisx-pc-build-run-$BUILD_NO" \
             malisx-pc-build-*.zip SHA256SUMS.txt \
-            --prerelease --title "malisx pc build $BUILD_NO" \
-            --notes "Install malisx-pc-build-$BUILD_NO.zip directly. The -fallback zip is only for the case where the main zip is not listed. Commit $GITHUB_SHA."
+            --prerelease --title "malisx pc build run-$BUILD_NO" \
+            --notes "Install malisx-pc-build-run-$BUILD_NO.zip directly. Features IDVS geometry optimization and fast vertex caching. Commit $GITHUB_SHA."
             
