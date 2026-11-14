@@ -8,6 +8,7 @@ permissions:
 
 env:
   NDK_VERSION: 28.2.13676358
+  BUILD_NO: "1"
 
 jobs:
   android:
@@ -18,101 +19,86 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch 1 - nested vkMapMemory
+      - name: Patch 1 - nested vkMapMemory and build name
         run: |
           python3 - <<'PY'
-          import sys
+          import os, sys
           L = lambda *a: "\n".join(a)
           def fail(p):
               sys.exit("PATCH FAILED: expected text not found in " + p)
 
           p = "meson.build"
           s = open(p).read()
-          if "0.5.0-pc" in s:
-              print("already applied:", p)
-          else:
-              old = "version : '0.5.0',"
-              if old not in s:
-                  fail(p)
-              open(p, "w").write(s.replace(old, "version : '0.5.0-pc2',", 1))
-              print("patched:", p)
+          old = "version : '0.5.0',"
+          if old not in s:
+              fail(p)
+          open(p, "w").write(s.replace(old, "version : 'pc-build" + os.environ["BUILD_NO"] + "',", 1))
+          print("patched:", p)
 
           p = "src/vk/mali_memory.h"
           s = open(p).read()
-          if "map_count" in s:
-              print("already applied:", p)
-          else:
-              old = L("   void *map;", "", "   /* The range [lo, hi) ever mapped")
-              new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (malisx-pc). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
-              if old not in s:
-                  fail(p)
-              open(p, "w").write(s.replace(old, new, 1))
-              print("patched:", p)
+          old = L("   void *map;", "", "   /* The range [lo, hi) ever mapped")
+          new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (malisx pc). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
+          if old not in s:
+              fail(p)
+          open(p, "w").write(s.replace(old, new, 1))
+          print("patched:", p)
 
           p = "src/vk/mali_device_memory.c"
           s = open(p).read()
-          if "malisx-pc: a nested" in s:
-              print("already applied:", p)
-          else:
-              edits = [
-                  (L("   if (mem->map)",
-                     '      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "memory is already mapped");'),
-                   "   /* malisx-pc: a nested vkMapMemory is tolerated (see map_count). */"),
-                  (L("      dmabuf_sync(mem, DMA_BUF_SYNC_START);",
-                     "      base = mem->dmabuf_map;"),
-                   L("      if (!mem->map)",
-                     "         dmabuf_sync(mem, DMA_BUF_SYNC_START);",
-                     "      base = mem->dmabuf_map;")),
-                  (L("   mem->map = base + offset;",
-                     "   if (mem->mapped_hi == mem->mapped_lo) {"),
-                   L("   if (!mem->map)",
-                     "      mem->map = base + offset;",
-                     "   mem->map_count++;",
-                     "   if (mem->mapped_hi == mem->mapped_lo) {")),
-                  (L("   *ppData = mem->map;",
-                     "   return VK_SUCCESS;"),
-                   L("   *ppData = base + offset;",
-                     "   return VK_SUCCESS;")),
-                  (L("   if (!mem || !mem->map)",
-                     "      return VK_SUCCESS;",
-                     "   /* No cache maintenance."),
-                   L("   if (!mem || !mem->map)",
-                     "      return VK_SUCCESS;",
-                     "   if (mem->map_count > 1) {",
-                     "      mem->map_count--;",
-                     "      return VK_SUCCESS;",
-                     "   }",
-                     "   mem->map_count = 0;",
-                     "   /* No cache maintenance.")),
-              ]
-              for old, new in edits:
-                  if old not in s:
-                      fail(p)
-                  s = s.replace(old, new, 1)
-              open(p, "w").write(s)
-              print("patched:", p)
+          edits = [
+              (L("   if (mem->map)",
+                 '      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "memory is already mapped");'),
+               "   /* malisx pc: a nested vkMapMemory is tolerated (see map_count). */"),
+              (L("      dmabuf_sync(mem, DMA_BUF_SYNC_START);",
+                 "      base = mem->dmabuf_map;"),
+               L("      if (!mem->map)",
+                 "         dmabuf_sync(mem, DMA_BUF_SYNC_START);",
+                 "      base = mem->dmabuf_map;")),
+              (L("   mem->map = base + offset;",
+                 "   if (mem->mapped_hi == mem->mapped_lo) {"),
+               L("   if (!mem->map)",
+                 "      mem->map = base + offset;",
+                 "   mem->map_count++;",
+                 "   if (mem->mapped_hi == mem->mapped_lo) {")),
+              (L("   *ppData = mem->map;",
+                 "   return VK_SUCCESS;"),
+               L("   *ppData = base + offset;",
+                 "   return VK_SUCCESS;")),
+              (L("   if (!mem || !mem->map)",
+                 "      return VK_SUCCESS;",
+                 "   /* No cache maintenance."),
+               L("   if (!mem || !mem->map)",
+                 "      return VK_SUCCESS;",
+                 "   if (mem->map_count > 1) {",
+                 "      mem->map_count--;",
+                 "      return VK_SUCCESS;",
+                 "   }",
+                 "   mem->map_count = 0;",
+                 "   /* No cache maintenance.")),
+          ]
+          for old, new in edits:
+              if old not in s:
+                  fail(p)
+              s = s.replace(old, new, 1)
+          open(p, "w").write(s)
+          print("patched:", p)
           PY
 
-      - name: Patch 2 - log to a file
+      - name: Patch 2 - log file helper
         run: |
           python3 - <<'PY'
-          import sys
-          p = "src/vk/mali_waist.c"
-          s = open(p).read()
-          if "mali_pc_loge" in s:
-              print("already applied:", p)
-              sys.exit(0)
-          marker = '#include "util/u_atomic.h"\n'
-          if marker not in s:
-              sys.exit("PATCH FAILED: marker not found in " + p)
-          helper = r'''
+          import os, sys
+          build = os.environ["BUILD_NO"]
+          header = r'''/* malisx pc: file log and call trace. Header only. */
+          #ifndef MALI_PC_TRACE_H
+          #define MALI_PC_TRACE_H
+
           #include <stdarg.h>
           #include <stdio.h>
           #include <unistd.h>
 
-          /* malisx-pc: also write the driver log to a file, because logcat is
-           * hard to read on a phone. */
-          static void
+          static inline void
           mali_pc_filelog(const char *line)
           {
              static const char *const paths[] = {
@@ -129,6 +115,29 @@ jobs:
                 return;
              }
           }
+
+          static inline void __attribute__((format(printf, 1, 2)))
+          mali_pc_trace(const char *fmt, ...)
+          {
+             char buf[512];
+             va_list ap;
+             va_start(ap, fmt);
+             vsnprintf(buf, sizeof(buf), fmt, ap);
+             va_end(ap);
+             mali_pc_filelog(buf);
+          }
+
+          #endif
+          '''
+          header = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in header.split("\n"))
+          open("src/vk/mali_pc_trace.h", "w").write(header)
+
+          p = "src/vk/mali_waist.c"
+          s = open(p).read()
+          marker = '#include "util/u_atomic.h"\n'
+          if marker not in s:
+              sys.exit("PATCH FAILED: marker not found in " + p)
+          helper = r'''#include "mali_pc_trace.h"
 
           static void __attribute__((format(printf, 1, 2)))
           mali_pc_loge(const char *fmt, ...)
@@ -153,11 +162,10 @@ jobs:
                 fclose(f);
              }
              char line[400];
-             snprintf(line, sizeof(line), "malisx-pc 0.5.0-pc2 loaded in %s", cmd);
+             snprintf(line, sizeof(line), "malisx pc build BUILDNO loaded in %s", cmd);
              mali_pc_filelog(line);
           }
-          '''
-          # the workflow indents this block by 10 spaces; strip that
+          '''.replace("BUILDNO", build)
           helper = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in helper.split("\n"))
           head, tail = s.split(marker, 1)
           if tail.count("mesa_loge(") != 4:
@@ -166,7 +174,113 @@ jobs:
           open(p, "w").write(head + marker + helper + tail)
           print("patched:", p)
           PY
-          git diff --stat
+
+      - name: Patch 3 - call trace
+        run: |
+          python3 - <<'PY'
+          import sys
+          def fail(p):
+              sys.exit("PATCH FAILED: expected text not found in " + p)
+          def add_include(s, p):
+              k = s.find('#include "')
+              if k < 0:
+                  fail(p)
+              return s[:k] + '#include "mali_pc_trace.h"\n' + s[k:]
+
+          # vkCreateInstance
+          p = "src/vk/mali_instance.c"
+          s = open(p).read()
+          old = "VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,"
+          new = "static VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateInstance_impl(const VkInstanceCreateInfo *pCreateInfo,"
+          if old not in s:
+              fail(p)
+          s = add_include(s.replace(old, new, 1), p)
+          s += r'''
+          VKAPI_ATTR VkResult VKAPI_CALL
+          mali_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+                              const VkAllocationCallbacks *pAllocator,
+                              VkInstance *pInstance)
+          {
+             mali_pc_trace("vkCreateInstance: enter, apiVersion 0x%x, %u extensions",
+                           pCreateInfo->pApplicationInfo ? pCreateInfo->pApplicationInfo->apiVersion : 0u,
+                           pCreateInfo->enabledExtensionCount);
+             for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
+                mali_pc_trace("  instance extension: %s", pCreateInfo->ppEnabledExtensionNames[i]);
+             VkResult r = mali_CreateInstance_impl(pCreateInfo, pAllocator, pInstance);
+             mali_pc_trace("vkCreateInstance: result %d", (int)r);
+             return r;
+          }
+          '''.replace("\n          ", "\n")
+          open(p, "w").write(s)
+          print("patched:", p)
+
+          # physical device enumeration
+          p = "src/vk/mali_physical_device.c"
+          s = open(p).read()
+          edits = [
+              ("   struct mali_instance *instance = container_of(vk_instance, struct mali_instance, vk);\n   const bool os_backend",
+               "   struct mali_instance *instance = container_of(vk_instance, struct mali_instance, vk);\n   mali_pc_trace(\"enumerate physical devices: enter\");\n   const bool os_backend"),
+              ("      VkResult result = physical_device_create(instance, path, &pdev);\n",
+               "      VkResult result = physical_device_create(instance, path, &pdev);\n      mali_pc_trace(\"physical_device_create(%s) -> %d\", path, (int)result);\n"),
+              ("   }\n   return VK_SUCCESS;\n}\n\nvoid\nmali_physical_device_destroy(",
+               "   }\n   mali_pc_trace(\"enumerate physical devices: done\");\n   return VK_SUCCESS;\n}\n\nvoid\nmali_physical_device_destroy("),
+          ]
+          for old, new in edits:
+              if old not in s:
+                  fail(p)
+              s = s.replace(old, new, 1)
+          open(p, "w").write(add_include(s, p))
+          print("patched:", p)
+
+          # vkCreateDevice
+          p = "src/vk/mali_device.c"
+          s = open(p).read()
+          old = "VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateDevice(VkPhysicalDevice physicalDevice,"
+          new = "static VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateDevice_impl(VkPhysicalDevice physicalDevice,"
+          if old not in s:
+              fail(p)
+          s = add_include(s.replace(old, new, 1), p)
+          s += r'''
+          VKAPI_ATTR VkResult VKAPI_CALL
+          mali_CreateDevice(VkPhysicalDevice physicalDevice,
+                            const VkDeviceCreateInfo *pCreateInfo,
+                            const VkAllocationCallbacks *pAllocator,
+                            VkDevice *pDevice)
+          {
+             mali_pc_trace("vkCreateDevice: enter, %u extensions", pCreateInfo->enabledExtensionCount);
+             for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
+                mali_pc_trace("  device extension: %s", pCreateInfo->ppEnabledExtensionNames[i]);
+             VkResult r = mali_CreateDevice_impl(physicalDevice, pCreateInfo, pAllocator, pDevice);
+             mali_pc_trace("vkCreateDevice: result %d", (int)r);
+             return r;
+          }
+          '''.replace("\n          ", "\n")
+          open(p, "w").write(s)
+          print("patched:", p)
+          PY
+
+      - name: Patch 4 - extensions
+        run: |
+          python3 - <<'PY'
+          import sys
+          p = "src/vk/mali_physical_device.c"
+          s = open(p).read()
+          edits = [
+              ("static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n",
+               "static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n   /* malisx pc: mirror-clamp is handled in mali_sampler.c; the divisor is\n    * applied by the v7 draw code (b->divisor). */\n   .KHR_sampler_mirror_clamp_to_edge = true,\n   .EXT_vertex_attribute_divisor = true,\n"),
+              ("   *f = (struct vk_features) {\n",
+               "   *f = (struct vk_features) {\n      /* malisx pc: VK_EXT_vertex_attribute_divisor. Zero divisor stays off. */\n      .vertexAttributeInstanceRateDivisor = true,\n      .vertexAttributeInstanceRateZeroDivisor = false,\n"),
+              ("   *props = (struct vk_properties) {\n",
+               "   *props = (struct vk_properties) {\n      .maxVertexAttribDivisor = 0xffffffffu,\n"),
+          ]
+          for old, new in edits:
+              if s.count(old) != 1:
+                  sys.exit("PATCH FAILED: anchor found %d times in %s:\n%s" % (s.count(old), p, old))
+              s = s.replace(old, new, 1)
+          open(p, "w").write(s)
+          print("patched:", p)
+          PY
+          git status --short
 
       - name: Fetch pinned Mesa
         run: |
@@ -219,48 +333,46 @@ jobs:
       - name: Package flat driver zips
         run: |
           TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          SHA=$(git rev-parse --short=10 HEAD)
-          for V in main t2meta; do
+          for V in main fallback; do
             mkdir -p out-$V
             "$TC/llvm-strip" -o out-$V/libvulkan_panfrost.so build-android/src/libvulkan_malisx2.so
           done
-          python3 - "$SHA" "${{ github.run_number }}" <<'PY'
+          python3 - "$BUILD_NO" <<'PY'
           import json, sys
-          sha, run = sys.argv[1], sys.argv[2]
+          b = sys.argv[1]
           base = {
               "schemaVersion": 1,
               "vendor": "Mesa",
-              "driverVersion": "Vulkan 1.1.366",
+              "driverVersion": "Vulkan 1.3.363",
               "minApi": 31,
               "libraryName": "libvulkan_panfrost.so",
           }
           main = dict(base)
           main.update({
-              "name": "malisx-pc 0.5.0-pc2 (" + sha + ")",
-              "description": "malisx-pc: malisx2 fork for Mali-G52 (v7) PC/DXVK work.",
-              "author": "malisx-pc (fork of malisx2 by bmdhacks)",
-              "packageVersion": run,
+              "name": "malisx pc build " + b,
+              "description": "malisx pc build " + b + ": Mali-G52 driver for PC games and emulators",
+              "author": "malisx pc (fork of malisx2 by bmdhacks)",
+              "packageVersion": b,
           })
           json.dump(main, open("out-main/meta.json", "w"), indent=2)
-          t2 = dict(base)
-          t2.update({
-              "driverVersion": "Vulkan 1.3.363",
+          fb = dict(base)
+          fb.update({
               "name": "LOADER-TEST malisx2 lib",
               "description": "LOADER TEST ONLY: malisx2 library in Jim-style metadata",
               "author": "malisx-pc loader test",
               "packageVersion": "11",
           })
-          json.dump(t2, open("out-t2meta/meta.json", "w"), indent=2)
+          json.dump(fb, open("out-fallback/meta.json", "w"), indent=2)
           PY
-          (cd out-main && zip -9 "../malisx-pc-0.5.0-pc2-$SHA.zip" libvulkan_panfrost.so meta.json)
-          (cd out-t2meta && zip -9 "../malisx-pc-0.5.0-pc2-$SHA-t2meta.zip" libvulkan_panfrost.so meta.json)
-          sha256sum malisx-pc-*.zip | tee SHA256SUMS.txt
+          (cd out-main && zip -9 "../malisx-pc-build-$BUILD_NO.zip" libvulkan_panfrost.so meta.json)
+          (cd out-fallback && zip -9 "../malisx-pc-build-$BUILD_NO-fallback.zip" libvulkan_panfrost.so meta.json)
+          sha256sum malisx-pc-build-*.zip | tee SHA256SUMS.txt
 
       - name: Publish release (flat zips)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "build-${{ github.run_number }}" \
-            malisx-pc-*.zip SHA256SUMS.txt \
-            --prerelease --title "malisx-pc build ${{ github.run_number }}" \
-            --notes "Install a flat zip directly. Main zip first; the t2meta zip is the fallback. Commit $GITHUB_SHA."
+          gh release create "malisx-pc-build-$BUILD_NO-run${{ github.run_number }}" \
+            malisx-pc-build-*.zip SHA256SUMS.txt \
+            --prerelease --title "malisx pc build $BUILD_NO" \
+            --notes "Install malisx-pc-build-$BUILD_NO.zip directly. The -fallback zip is only for the case where the main zip is not listed. Commit $GITHUB_SHA."
