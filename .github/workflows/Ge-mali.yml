@@ -281,7 +281,7 @@ jobs:
           print("patched:", p)
           PY
 
-      - name: Patch 5 - Dynamic UMA VRAM sizing for Vita3K (RAM-aware)
+      - name: Patch 5 - Dynamic RAM/VRAM profiler and UMA heap sizing (with stdbool.h fix)
         run: |
           python3 - <<'PY'
           import sys
@@ -290,6 +290,7 @@ jobs:
           #ifndef MALI_PC_VRAM_H
           #define MALI_PC_VRAM_H
 
+          #include <stdbool.h>
           #include <stdint.h>
           #include <stdio.h>
           #include <stdlib.h>
@@ -431,7 +432,6 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
           
-          # Inject performance optimizations, IDVS geometry, vertex cache, and FP16 math directly into the cross-file options safely
           python3 -c "
           import configparser
           config = configparser.ConfigParser(allow_no_value=True, delimiters=('='))
@@ -484,4 +484,6 @@ jobs:
               "description": "malisx pc build " + b + ": Mali-G52 driver for PC games and emulators",
               "author": "malisx pc (fork of malisx2 by bmdhacks)",
               "packageVersion": b,
+          })
+          json.dump(main, open("out-main/meta.json", "w"), indent=2)
     
