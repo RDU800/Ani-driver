@@ -18,6 +18,82 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Apply malisx-pc patch
+        run: |
+          python3 - <<'PY'
+          import sys
+          L = lambda *a: "\n".join(a)
+          def fail(p):
+              sys.exit("PATCH FAILED: expected text not found in " + p)
+
+          p = "meson.build"
+          s = open(p).read()
+          if "0.5.0-pc1" in s:
+              print("already applied:", p)
+          else:
+              old = "version : '0.5.0',"
+              if old not in s:
+                  fail(p)
+              open(p, "w").write(s.replace(old, "version : '0.5.0-pc1',", 1))
+              print("patched:", p)
+
+          p = "src/vk/mali_memory.h"
+          s = open(p).read()
+          if "map_count" in s:
+              print("already applied:", p)
+          else:
+              old = L("   void *map;", "", "   /* The range [lo, hi) ever mapped")
+              new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (malisx-pc). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
+              if old not in s:
+                  fail(p)
+              open(p, "w").write(s.replace(old, new, 1))
+              print("patched:", p)
+
+          p = "src/vk/mali_device_memory.c"
+          s = open(p).read()
+          if "malisx-pc: a nested" in s:
+              print("already applied:", p)
+          else:
+              edits = [
+                  (L("   if (mem->map)",
+                     '      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "memory is already mapped");'),
+                   "   /* malisx-pc: a nested vkMapMemory is tolerated (see map_count). */"),
+                  (L("      dmabuf_sync(mem, DMA_BUF_SYNC_START);",
+                     "      base = mem->dmabuf_map;"),
+                   L("      if (!mem->map)",
+                     "         dmabuf_sync(mem, DMA_BUF_SYNC_START);",
+                     "      base = mem->dmabuf_map;")),
+                  (L("   mem->map = base + offset;",
+                     "   if (mem->mapped_hi == mem->mapped_lo) {"),
+                   L("   if (!mem->map)",
+                     "      mem->map = base + offset;",
+                     "   mem->map_count++;",
+                     "   if (mem->mapped_hi == mem->mapped_lo) {")),
+                  (L("   *ppData = mem->map;",
+                     "   return VK_SUCCESS;"),
+                   L("   *ppData = base + offset;",
+                     "   return VK_SUCCESS;")),
+                  (L("   if (!mem || !mem->map)",
+                     "      return VK_SUCCESS;",
+                     "   /* No cache maintenance."),
+                   L("   if (!mem || !mem->map)",
+                     "      return VK_SUCCESS;",
+                     "   if (mem->map_count > 1) {",
+                     "      mem->map_count--;",
+                     "      return VK_SUCCESS;",
+                     "   }",
+                     "   mem->map_count = 0;",
+                     "   /* No cache maintenance.")),
+              ]
+              for old, new in edits:
+                  if old not in s:
+                      fail(p)
+                  s = s.replace(old, new, 1)
+              open(p, "w").write(s)
+              print("patched:", p)
+          PY
+          git diff --stat
+
       - name: Fetch pinned Mesa
         run: |
           MESA_COMMIT=$(sed -n "s/^mesa_commit = '\(.*\)'/\1/p" meson.build)
@@ -66,41 +142,41 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           ninja -C build-android
 
-      - name: Package flat driver zip
+      - name: Package flat driver zips
         run: |
           TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
           SHA=$(git rev-parse --short=10 HEAD)
-          PKG="malisx-pc-0.5.0-pc1-$SHA"
-          mkdir -p out
-          "$TC/llvm-strip" -o out/libvulkan_malisx2.so build-android/src/libvulkan_malisx2.so
-          cat > out/meta.json <<EOT
-          {
-            "schemaVersion": 1,
-            "name": "malisx-pc 0.5.0-pc1 ($SHA)",
-            "description": "malisx2 fork for Mali-G52 (v7) PC/DXVK work: malisx-pc",
-            "author": "malisx-pc (fork of malisx2 by bmdhacks)",
-            "packageVersion": "0.5.0-pc1+$SHA",
-            "vendor": "malisx-pc",
-            "driverVersion": "44.1.0",
-            "minApi": 29,
-            "libraryName": "libvulkan_malisx2.so"
-          }
-          EOT
-          sed -i 's/^ *//' out/meta.json
-          (cd out && zip -9 "../$PKG.zip" libvulkan_malisx2.so meta.json)
-          sha256sum "$PKG.zip" | tee "$PKG.zip.sha256"
-          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          for V in A B; do
+            mkdir -p out$V
+            "$TC/llvm-strip" -o out$V/libvulkan_panfrost.so build-android/src/libvulkan_malisx2.so
+          done
+          python3 - "$SHA" <<'PY'
+          import json, sys
+          sha = sys.argv[1]
+          def meta(name):
+              return {
+                  "schemaVersion": 1,
+                  "name": name,
+                  "description": "malisx-pc: malisx2 fork for Mali-G52 (v7) PC/DXVK work. Not Mesa PanVK.",
+                  "author": "malisx-pc (fork of malisx2 by bmdhacks)",
+                  "packageVersion": "0.5.0-pc1+" + sha,
+                  "vendor": "malisx-pc",
+                  "driverVersion": "44.1.0",
+                  "minApi": 29,
+                  "libraryName": "libvulkan_panfrost.so",
+              }
+          json.dump(meta("malisx-pc 0.5.0-pc1 (" + sha + ")"), open("outA/meta.json", "w"), indent=2)
+          json.dump(meta("PanVK-malisx-pc 0.5.0-pc1 (" + sha + ")"), open("outB/meta.json", "w"), indent=2)
+          PY
+          (cd outA && zip -9 "../malisx-pc-0.5.0-pc1-$SHA-A.zip" libvulkan_panfrost.so meta.json)
+          (cd outB && zip -9 "../malisx-pc-0.5.0-pc1-$SHA-B-panvk-name.zip" libvulkan_panfrost.so meta.json)
+          sha256sum malisx-pc-*.zip | tee SHA256SUMS.txt
 
-      - name: Publish release (flat zip)
+      - name: Publish release (flat zips)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "build-${{ github.run_number }}" \
-            "$PKG.zip" "$PKG.zip.sha256" \
+            malisx-pc-*.zip SHA256SUMS.txt \
             --prerelease --title "malisx-pc build ${{ github.run_number }}" \
-            --notes "Flat driver zip: install this file directly. Commit $GITHUB_SHA."
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.PKG }}-workflow-artifact
-          path: ${{ env.PKG }}.zip
+            --notes "Install a flat zip directly. A = normal name, B = name starting with PanVK. Commit $GITHUB_SHA."
