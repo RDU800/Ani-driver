@@ -286,7 +286,6 @@ jobs:
           python3 - <<'PY'
           import sys
 
-          # 1. Create dynamic RAM/App detection header
           vram_header = r'''/* malisx pc: Boot-time RAM and Emulator App Profiler for Dynamic UMA VRAM sizing. */
           #ifndef MALI_PC_VRAM_H
           #define MALI_PC_VRAM_H
@@ -344,19 +343,19 @@ jobs:
              if (is_vita) {
                 profile = "vita3k";
                 if (ram_mb <= 4600)
-                   vram_mb = 1350;      /* 4GB device: safe ceiling without OOM */
+                   vram_mb = 1350;
                 else if (ram_mb <= 9000)
-                   vram_mb = 3072;      /* 8GB device: dedicated 3.0GB UMA pool */
+                   vram_mb = 3072;
                 else
-                   vram_mb = 4608;      /* 12GB-16GB+ device: 4.5GB headroom */
+                   vram_mb = 4608;
              } else if (is_pc) {
                 profile = "pc-translator";
                 if (ram_mb <= 4600)
                    vram_mb = 1536;
                 else if (ram_mb <= 9000)
-                   vram_mb = 3584;      /* 8GB device: 3.5GB for DXVK/VKD3D */
+                   vram_mb = 3584;
                 else
-                   vram_mb = 5632;      /* 12GB-16GB+ device: 5.5GB pool */
+                   vram_mb = 5632;
              } else {
                 if (ram_mb <= 4600)
                    vram_mb = 1024;
@@ -377,7 +376,6 @@ jobs:
           vram_header = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in vram_header.split("\n"))
           open("src/vk/mali_pc_vram.h", "w").write(vram_header)
 
-          # 2. Pre-warm the VRAM calculation at boot inside mali_waist.c constructor
           p_waist = "src/vk/mali_waist.c"
           s_waist = open(p_waist).read()
           target_ctor = 'snprintf(line, sizeof(line), "malisx pc build run-'
@@ -391,7 +389,6 @@ jobs:
           open(p_waist, "w").write(s_waist)
           print("patched:", p_waist)
 
-          # 3. Override physical device memory heap sizing in mali_physical_device.c
           p_pdev = "src/vk/mali_physical_device.c"
           s_pdev = open(p_pdev).read()
           s_pdev = '#include "mali_pc_vram.h"\n' + s_pdev
@@ -421,7 +418,6 @@ jobs:
           open(p_pdev, "w").write(s_pdev)
           print("patched:", p_pdev)
           PY
-          git status --short
 
       - name: Fetch pinned Mesa
         run: |
@@ -464,18 +460,29 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
           
-          # Safely append performance, FP16, and geometry flags to the cross-file using Python
           python3 -c "
-          with open('cross-ci.ini', 'r') as f:
-              content = f.read()
+          import configparser
+          config = configparser.ConfigParser(allow_no_value=True, delimiters=('='))
+          config.optionxform = str
+          config.read('cross-ci.ini')
           
-          flags = \"'-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1'\"
-          content = content.replace('c_args = [', 'c_args = [' + flags + ', ')
-          content = content.replace('cpp_args = [', 'cpp_args = [' + flags + ', ')
+          for opt in ['c_args', 'cpp_args']:
+              if config.has_option('built-in options', opt):
+                  val = config.get('built-in options', opt).strip()
+                  if val.startswith('[') and val.endswith(']'):
+                      val = val[1:-1].strip()
+                  new_flags = \"'-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1'\"
+                  if val:
+                      updated = f\"[{val}, {new_flags}]\"
+                  else:
+                      updated = f\"[{new_flags}]\"
+                  config.set('built-in options', opt, updated)
           
           with open('cross-ci.ini', 'w') as f:
-              f.write(content)
+              config.write(f, space_around_delimiters=False)
           "
           
-          grep '^ndk' cross-ci.ini
-      
+          cat cross-ci.ini
+          meson setup build-android --cross-file cross-ci.ini --buildtype=release
+
+      - name:
