@@ -42,17 +42,16 @@ jobs:
       - name: Checkout Repository (Patches & Configs)
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies & Force Latest Meson
+      - name: Install System Dependencies & Python Pip
         run: |
-          sudo apt-get remove -y python3-meson || true
           sudo apt-get update
           sudo apt-get install -y \
             ninja-build python3-pip python3-mako python3-yaml python3-ply \
             clang llvm-18-dev libclang-18-dev spirv-tools glslang-tools \
             libdrm-dev libelf-dev flex bison zip unzip wget git pkg-config \
             patchelf rustc cargo
-          pip3 install --no-cache-dir --upgrade pip
-          pip3 install --no-cache-dir "meson>=1.7.0"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --no-cache-dir meson>=1.7.0
           rustup target add aarch64-linux-android
 
       - name: Download & Extract Android NDK
@@ -78,15 +77,6 @@ jobs:
           else
             echo "No custom patches found in patches/ directory."
           fi
-
-      - name: Build Host Panfrost Offline Shader Compiler (CLC)
-        run: |
-          meson setup build-host mesa-src \
-            -Dgallium-drivers=panfrost \
-            -Dvulkan-drivers= \
-            -Dtools=panfrost \
-            -Dllvm=enabled
-          ninja -C build-host src/panfrost/clc/panfrost_compile
 
       - name: Generate Android NDK Meson Cross-File with Vita3K / Mali-G52 Flags
         run: |
@@ -126,8 +116,7 @@ jobs:
 
       - name: Configure PanVK for Android (mali_kbase)
         run: |
-          export PATH="$PWD/build-host/src/panfrost/clc:$PATH"
-          meson setup build-android mesa-src \
+          python3 -m meson setup build-android mesa-src \
             --cross-file android-aarch64.txt \
             --buildtype=${{ github.event.inputs.build_type || 'release' }} \
             -Dstrip=true \
@@ -151,7 +140,6 @@ jobs:
 
       - name: Compile Android Vulkan Driver (.so)
         run: |
-          export PATH="$PWD/build-host/src/panfrost/clc:$PATH"
           ninja -C build-android src/panfrost/vulkan/libvulkan_panfrost.so
 
       - name: Fix SONAME & Package Adrenotools ZIP
