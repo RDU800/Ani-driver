@@ -54,7 +54,7 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
           ls "$ANDROID_HOME/ndk/$NDK_VERSION"
 
-       - name: Configure
+      - name: Configure
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
