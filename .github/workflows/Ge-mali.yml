@@ -280,6 +280,147 @@ jobs:
           open(p, "w").write(s)
           print("patched:", p)
           PY
+
+      - name: Patch 5 - dynamic RAM/VRAM profiler and UMA heap sizing
+        run: |
+          python3 - <<'PY'
+          import sys
+
+          # 1. Create dynamic RAM/App detection header
+          vram_header = r'''/* malisx pc: Boot-time RAM and Emulator App Profiler for Dynamic UMA VRAM sizing. */
+          #ifndef MALI_PC_VRAM_H
+          #define MALI_PC_VRAM_H
+
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include "mali_pc_trace.h"
+
+          static uint64_t mali_pc_cached_vram_bytes = 0;
+
+          static inline uint64_t
+          mali_pc_get_total_ram_mb(void)
+          {
+             FILE *f = fopen("/proc/meminfo", "r");
+             if (!f)
+                return 8192;
+             char line[256];
+             uint64_t mem_kb = 0;
+             while (fgets(line, sizeof(line), f)) {
+                if (strncmp(line, "MemTotal:", 9) == 0) {
+                   sscanf(line + 9, "%llu", (unsigned long long *)&mem_kb);
+                   break;
+                }
+             }
+             fclose(f);
+             return mem_kb > 0 ? (mem_kb / 1024ULL) : 8192;
+          }
+
+          static inline uint64_t
+          mali_pc_compute_vram_budget(void)
+          {
+             if (mali_pc_cached_vram_bytes > 0)
+                return mali_pc_cached_vram_bytes;
+
+             uint64_t ram_mb = mali_pc_get_total_ram_mb();
+             char cmd[256] = {0};
+             FILE *f = fopen("/proc/self/cmdline", "r");
+             if (f) {
+                size_t n = fread(cmd, 1, sizeof(cmd) - 1, f);
+                for (size_t i = 0; i < n; i++) {
+                   if (cmd[i] == '\0')
+                      cmd[i] = ' ';
+                }
+                fclose(f);
+             }
+
+             bool is_vita = (strstr(cmd, "vita3k") != NULL || strstr(cmd, "Vita3K") != NULL);
+             bool is_pc = (strstr(cmd, "winlator") != NULL || strstr(cmd, "wine") != NULL || strstr(cmd, "box64") != NULL);
+
+             uint64_t vram_mb = 1024;
+             const char *profile = "default";
+
+             if (is_vita) {
+                profile = "vita3k";
+                if (ram_mb <= 4600)
+                   vram_mb = 1350;      /* 4GB device: safe ceiling without OOM */
+                else if (ram_mb <= 9000)
+                   vram_mb = 3072;      /* 8GB device: dedicated 3.0GB UMA pool */
+                else
+                   vram_mb = 4608;      /* 12GB-16GB+ device: 4.5GB headroom */
+             } else if (is_pc) {
+                profile = "pc-translator";
+                if (ram_mb <= 4600)
+                   vram_mb = 1536;
+                else if (ram_mb <= 9000)
+                   vram_mb = 3584;      /* 8GB device: 3.5GB for DXVK/VKD3D */
+                else
+                   vram_mb = 5632;      /* 12GB-16GB+ device: 5.5GB pool */
+             } else {
+                if (ram_mb <= 4600)
+                   vram_mb = 1024;
+                else if (ram_mb <= 9000)
+                   vram_mb = 2048;
+                else
+                   vram_mb = 3072;
+             }
+
+             mali_pc_cached_vram_bytes = vram_mb * 1024ULL * 1024ULL;
+             mali_pc_trace("VRAM Profiler: RAM=%llu MB | Profile=%s | Dedicated UMA Heap=%llu MB",
+                           (unsigned long long)ram_mb, profile, (unsigned long long)vram_mb);
+             return mali_pc_cached_vram_bytes;
+          }
+
+          #endif
+          '''
+          vram_header = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in vram_header.split("\n"))
+          open("src/vk/mali_pc_vram.h", "w").write(vram_header)
+
+          # 2. Pre-warm the VRAM calculation at boot inside mali_waist.c constructor
+          p_waist = "src/vk/mali_waist.c"
+          s_waist = open(p_waist).read()
+          target_ctor = 'snprintf(line, sizeof(line), "malisx pc build run-'
+          if target_ctor not in s_waist:
+              sys.exit("PATCH FAILED: constructor anchor not found in " + p_waist)
+          s_waist = '#include "mali_pc_vram.h"\n' + s_waist.replace(
+              target_ctor,
+              'mali_pc_compute_vram_budget();\n   ' + target_ctor,
+              1
+          )
+          open(p_waist, "w").write(s_waist)
+          print("patched:", p_waist)
+
+          # 3. Override physical device memory heap sizing in mali_physical_device.c
+          p_pdev = "src/vk/mali_physical_device.c"
+          s_pdev = open(p_pdev).read()
+          s_pdev = '#include "mali_pc_vram.h"\n' + s_pdev
+
+          old_mem_fn = "VKAPI_ATTR void VKAPI_CALL\nmali_GetPhysicalDeviceMemoryProperties2("
+          new_mem_fn = "static VKAPI_ATTR void VKAPI_CALL\nmali_GetPhysicalDeviceMemoryProperties2_impl("
+          if old_mem_fn not in s_pdev:
+              sys.exit("PATCH FAILED: mali_GetPhysicalDeviceMemoryProperties2 not found in " + p_pdev)
+
+          s_pdev = s_pdev.replace(old_mem_fn, new_mem_fn, 1)
+          s_pdev += r'''
+          VKAPI_ATTR void VKAPI_CALL
+          mali_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
+                                                  VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
+          {
+             mali_GetPhysicalDeviceMemoryProperties2_impl(physicalDevice, pMemoryProperties);
+             uint64_t target_vram = mali_pc_compute_vram_budget();
+             VkPhysicalDeviceMemoryProperties *props = &pMemoryProperties->memoryProperties;
+             for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
+                if (props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+                   props->memoryHeaps[i].size = target_vram;
+                }
+             }
+          }
+          '''.replace("\n          ", "\n")
+
+          open(p_pdev, "w").write(s_pdev)
+          print("patched:", p_pdev)
+          PY
           git status --short
 
       - name: Fetch pinned Mesa
@@ -318,18 +459,17 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
           ls "$ANDROID_HOME/ndk/$NDK_VERSION"
 
-      - name: Configure with Performance & Geometry flags
+      - name: Configure with Performance, FP16 & Geometry flags
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
           
-          # Safely append performance and geometry flags to the cross-file using Python
+          # Safely append performance, FP16, and geometry flags to the cross-file using Python
           python3 -c "
           with open('cross-ci.ini', 'r') as f:
               content = f.read()
           
-          # Append flags inside built-in options
-          flags = \"''-O3'', ''-DPAN_FORCE_IDVS=1'', ''-DPAN_FAST_VERTEX_CACHE=1''\"
+          flags = \"'-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1'\"
           content = content.replace('c_args = [', 'c_args = [' + flags + ', ')
           content = content.replace('cpp_args = [', 'cpp_args = [' + flags + ', ')
           
@@ -338,57 +478,4 @@ jobs:
           "
           
           grep '^ndk' cross-ci.ini
-          meson setup build-android --cross-file cross-ci.ini --buildtype=release
-
-      - name: Build
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          ninja -C build-android
-
-      - name: Package flat driver zips
-        run: |
-          TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          for V in main fallback; do
-            mkdir -p out-$V
-            "$TC/llvm-strip" -o out-$V/libvulkan_panfrost.so build-android/src/libvulkan_malisx2.so
-          done
-          python3 - "$BUILD_NO" <<'PY'
-          import json, sys
-          b = sys.argv[1]
-          base = {
-              "schemaVersion": 1,
-              "vendor": "Mesa",
-              "driverVersion": "Vulkan 1.3.363",
-              "minApi": 31,
-              "libraryName": "libvulkan_panfrost.so",
-          }
-          main = dict(base)
-          main.update({
-              "name": "malisx pc build run-" + b,
-              "description": "malisx pc build run-" + b + ": Mali-G52 driver optimized for PC games, emulation, and geometry",
-              "author": "malisx pc (fork of malisx2 by bmdhacks)",
-              "packageVersion": b,
-          })
-          json.dump(main, open("out-main/meta.json", "w"), indent=2)
-          fb = dict(base)
-          fb.update({
-              "name": "LOADER-TEST malisx2 lib",
-              "description": "LOADER TEST ONLY: malisx2 library in Jim-style metadata",
-              "author": "malisx-pc loader test",
-              "packageVersion": "11",
-          })
-          json.dump(fb, open("out-fallback/meta.json", "w"), indent=2)
-          PY
-          (cd out-main && zip -9 "../malisx-pc-build-run-$BUILD_NO.zip" libvulkan_panfrost.so meta.json)
-          (cd out-fallback && zip -9 "../malisx-pc-build-run-$BUILD_NO-fallback.zip" libvulkan_panfrost.so meta.json)
-          sha256sum malisx-pc-build-*.zip | tee SHA256SUMS.txt
-
-      - name: Publish release (flat zips)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "malisx-pc-build-run-$BUILD_NO" \
-            malisx-pc-build-*.zip SHA256SUMS.txt \
-            --prerelease --title "malisx pc build run-$BUILD_NO" \
-            --notes "Install malisx-pc-build-run-$BUILD_NO.zip directly. Features IDVS geometry optimization and fast vertex caching. Commit $GITHUB_SHA."
-            
+      
