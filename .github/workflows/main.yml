@@ -18,7 +18,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply malisx-pc patch
+      - name: Patch 1 - nested vkMapMemory
         run: |
           python3 - <<'PY'
           import sys
@@ -28,13 +28,13 @@ jobs:
 
           p = "meson.build"
           s = open(p).read()
-          if "0.5.0-pc1" in s:
+          if "0.5.0-pc" in s:
               print("already applied:", p)
           else:
               old = "version : '0.5.0',"
               if old not in s:
                   fail(p)
-              open(p, "w").write(s.replace(old, "version : '0.5.0-pc1',", 1))
+              open(p, "w").write(s.replace(old, "version : '0.5.0-pc2',", 1))
               print("patched:", p)
 
           p = "src/vk/mali_memory.h"
@@ -91,6 +91,80 @@ jobs:
                   s = s.replace(old, new, 1)
               open(p, "w").write(s)
               print("patched:", p)
+          PY
+
+      - name: Patch 2 - log to a file
+        run: |
+          python3 - <<'PY'
+          import sys
+          p = "src/vk/mali_waist.c"
+          s = open(p).read()
+          if "mali_pc_loge" in s:
+              print("already applied:", p)
+              sys.exit(0)
+          marker = '#include "util/u_atomic.h"\n'
+          if marker not in s:
+              sys.exit("PATCH FAILED: marker not found in " + p)
+          helper = r'''
+          #include <stdarg.h>
+          #include <stdio.h>
+          #include <unistd.h>
+
+          /* malisx-pc: also write the driver log to a file, because logcat is
+           * hard to read on a phone. */
+          static void
+          mali_pc_filelog(const char *line)
+          {
+             static const char *const paths[] = {
+                "/sdcard/Download/malisx-pc.log",
+                "/storage/emulated/0/Download/malisx-pc.log",
+                "/data/local/tmp/malisx-pc.log",
+             };
+             for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+                FILE *f = fopen(paths[i], "a");
+                if (!f)
+                   continue;
+                fprintf(f, "[pid %d] %s\n", (int)getpid(), line);
+                fclose(f);
+                return;
+             }
+          }
+
+          static void __attribute__((format(printf, 1, 2)))
+          mali_pc_loge(const char *fmt, ...)
+          {
+             char buf[512];
+             va_list ap;
+             va_start(ap, fmt);
+             vsnprintf(buf, sizeof(buf), fmt, ap);
+             va_end(ap);
+             mesa_loge("%s", buf);
+             mali_pc_filelog(buf);
+          }
+
+          static void __attribute__((constructor))
+          mali_pc_loaded(void)
+          {
+             char cmd[256] = "?";
+             FILE *f = fopen("/proc/self/cmdline", "r");
+             if (f) {
+                size_t n = fread(cmd, 1, sizeof(cmd) - 1, f);
+                cmd[n] = 0;
+                fclose(f);
+             }
+             char line[400];
+             snprintf(line, sizeof(line), "malisx-pc 0.5.0-pc2 loaded in %s", cmd);
+             mali_pc_filelog(line);
+          }
+          '''
+          # the workflow indents this block by 10 spaces; strip that
+          helper = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in helper.split("\n"))
+          head, tail = s.split(marker, 1)
+          if tail.count("mesa_loge(") != 4:
+              sys.exit("PATCH FAILED: expected 4 mesa_loge calls, found %d" % tail.count("mesa_loge("))
+          tail = tail.replace("mesa_loge(", "mali_pc_loge(")
+          open(p, "w").write(head + marker + helper + tail)
+          print("patched:", p)
           PY
           git diff --stat
 
@@ -162,7 +236,7 @@ jobs:
           }
           main = dict(base)
           main.update({
-              "name": "malisx-pc 0.5.0-pc1 (" + sha + ")",
+              "name": "malisx-pc 0.5.0-pc2 (" + sha + ")",
               "description": "malisx-pc: malisx2 fork for Mali-G52 (v7) PC/DXVK work.",
               "author": "malisx-pc (fork of malisx2 by bmdhacks)",
               "packageVersion": run,
@@ -178,8 +252,8 @@ jobs:
           })
           json.dump(t2, open("out-t2meta/meta.json", "w"), indent=2)
           PY
-          (cd out-main && zip -9 "../malisx-pc-0.5.0-pc1-$SHA.zip" libvulkan_panfrost.so meta.json)
-          (cd out-t2meta && zip -9 "../malisx-pc-0.5.0-pc1-$SHA-t2meta.zip" libvulkan_panfrost.so meta.json)
+          (cd out-main && zip -9 "../malisx-pc-0.5.0-pc2-$SHA.zip" libvulkan_panfrost.so meta.json)
+          (cd out-t2meta && zip -9 "../malisx-pc-0.5.0-pc2-$SHA-t2meta.zip" libvulkan_panfrost.so meta.json)
           sha256sum malisx-pc-*.zip | tee SHA256SUMS.txt
 
       - name: Publish release (flat zips)
