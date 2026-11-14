@@ -1,394 +1,187 @@
-name: build-malisx-pc
+name: Build Malisx PanVK (Vita3K / Mali-G52 Kbase)
 
 on:
-  workflow_dispatch: {}
-
-permissions:
-  contents: write
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Malisx / PanVK JM Kbase Mesa Fork URL'
+        required: true
+        default: 'https://github.com/bmdhacks/malisx2.git'
+      source_ref:
+        description: 'Branch, tag, or commit SHA'
+        required: true
+        default: 'main'
+      driver_name:
+        description: 'Display name in Winlator / Vita3K'
+        required: true
+        default: 'Malisx PanVK (Vita3K / Mali-G52)'
+      driver_version:
+        description: 'Driver version tag'
+        required: true
+        default: 'v0.2-vita-opt'
+      build_type:
+        description: 'Meson build type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debugoptimized
 
 env:
-  NDK_VERSION: 28.2.13676358
-  BUILD_NO: "1"
+  NDK_VERSION: r27c
+  ANDROID_API: 29
 
 jobs:
-  android:
+  build-driver:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout Repository (Patches & Configs)
+        uses: actions/checkout@v4
 
-      - name: Patch 1 - nested vkMapMemory and build name
-        run: |
-          python3 - <<'PY'
-          import os, sys
-          L = lambda *a: "\n".join(a)
-          def fail(p):
-              sys.exit("PATCH FAILED: expected text not found in " + p)
-
-          p = "meson.build"
-          s = open(p).read()
-          old = "version : '0.5.0',"
-          if old not in s:
-              fail(p)
-          open(p, "w").write(s.replace(old, "version : 'pc-build" + os.environ["BUILD_NO"] + "',", 1))
-          print("patched:", p)
-
-          p = "src/vk/mali_memory.h"
-          s = open(p).read()
-          old = L("   void *map;", "", "   /* The range [lo, hi) ever mapped")
-          new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (malisx pc). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
-          if old not in s:
-              fail(p)
-          open(p, "w").write(s.replace(old, new, 1))
-          print("patched:", p)
-
-          p = "src/vk/mali_device_memory.c"
-          s = open(p).read()
-          edits = [
-              (L("   if (mem->map)",
-                 '      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "memory is already mapped");'),
-               "   /* malisx pc: a nested vkMapMemory is tolerated (see map_count). */"),
-              (L("      dmabuf_sync(mem, DMA_BUF_SYNC_START);",
-                 "      base = mem->dmabuf_map;"),
-               L("      if (!mem->map)",
-                 "         dmabuf_sync(mem, DMA_BUF_SYNC_START);",
-                 "      base = mem->dmabuf_map;")),
-              (L("   mem->map = base + offset;",
-                 "   if (mem->mapped_hi == mem->mapped_lo) {"),
-               L("   if (!mem->map)",
-                 "      mem->map = base + offset;",
-                 "   mem->map_count++;",
-                 "   if (mem->mapped_hi == mem->mapped_lo) {")),
-              (L("   *ppData = mem->map;",
-                 "   return VK_SUCCESS;"),
-               L("   *ppData = base + offset;",
-                 "   return VK_SUCCESS;")),
-              (L("   if (!mem || !mem->map)",
-                 "      return VK_SUCCESS;",
-                 "   /* No cache maintenance."),
-               L("   if (!mem || !mem->map)",
-                 "      return VK_SUCCESS;",
-                 "   if (mem->map_count > 1) {",
-                 "      mem->map_count--;",
-                 "      return VK_SUCCESS;",
-                 "   }",
-                 "   mem->map_count = 0;",
-                 "   /* No cache maintenance.")),
-          ]
-          for old, new in edits:
-              if old not in s:
-                  fail(p)
-              s = s.replace(old, new, 1)
-          open(p, "w").write(s)
-          print("patched:", p)
-          PY
-
-      - name: Patch 2 - log file helper
-        run: |
-          python3 - <<'PY'
-          import os, sys
-          build = os.environ["BUILD_NO"]
-          header = r'''/* malisx pc: file log and call trace. Header only. */
-          #ifndef MALI_PC_TRACE_H
-          #define MALI_PC_TRACE_H
-
-          #include <stdarg.h>
-          #include <stdio.h>
-          #include <unistd.h>
-
-          static inline void
-          mali_pc_filelog(const char *line)
-          {
-             static const char *const paths[] = {
-                "/sdcard/Download/malisx-pc.log",
-                "/storage/emulated/0/Download/malisx-pc.log",
-                "/data/local/tmp/malisx-pc.log",
-             };
-             for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-                FILE *f = fopen(paths[i], "a");
-                if (!f)
-                   continue;
-                fprintf(f, "[pid %d] %s\n", (int)getpid(), line);
-                fclose(f);
-                return;
-             }
-          }
-
-          static inline void __attribute__((format(printf, 1, 2)))
-          mali_pc_trace(const char *fmt, ...)
-          {
-             char buf[512];
-             va_list ap;
-             va_start(ap, fmt);
-             vsnprintf(buf, sizeof(buf), fmt, ap);
-             va_end(ap);
-             mali_pc_filelog(buf);
-          }
-
-          #endif
-          '''
-          header = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in header.split("\n"))
-          open("src/vk/mali_pc_trace.h", "w").write(header)
-
-          p = "src/vk/mali_waist.c"
-          s = open(p).read()
-          marker = '#include "util/u_atomic.h"\n'
-          if marker not in s:
-              sys.exit("PATCH FAILED: marker not found in " + p)
-          helper = r'''#include "mali_pc_trace.h"
-
-          static void __attribute__((format(printf, 1, 2)))
-          mali_pc_loge(const char *fmt, ...)
-          {
-             char buf[512];
-             va_list ap;
-             va_start(ap, fmt);
-             vsnprintf(buf, sizeof(buf), fmt, ap);
-             va_end(ap);
-             mesa_loge("%s", buf);
-             mali_pc_filelog(buf);
-          }
-
-          static void __attribute__((constructor))
-          mali_pc_loaded(void)
-          {
-             char cmd[256] = "?";
-             FILE *f = fopen("/proc/self/cmdline", "r");
-             if (f) {
-                size_t n = fread(cmd, 1, sizeof(cmd) - 1, f);
-                cmd[n] = 0;
-                fclose(f);
-             }
-             char line[400];
-             snprintf(line, sizeof(line), "malisx pc build BUILDNO loaded in %s", cmd);
-             mali_pc_filelog(line);
-          }
-          '''.replace("BUILDNO", build)
-          helper = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in helper.split("\n"))
-          head, tail = s.split(marker, 1)
-          if tail.count("mesa_loge(") != 4:
-              sys.exit("PATCH FAILED: expected 4 mesa_loge calls, found %d" % tail.count("mesa_loge("))
-          tail = tail.replace("mesa_loge(", "mali_pc_loge(")
-          open(p, "w").write(head + marker + helper + tail)
-          print("patched:", p)
-          PY
-
-      - name: Patch 3 - call trace
-        run: |
-          python3 - <<'PY'
-          import sys
-          def fail(p):
-              sys.exit("PATCH FAILED: expected text not found in " + p)
-          def add_include(s, p):
-              k = s.find('#include "')
-              if k < 0:
-                  fail(p)
-              return s[:k] + '#include "mali_pc_trace.h"\n' + s[k:]
-
-          # vkCreateInstance
-          p = "src/vk/mali_instance.c"
-          s = open(p).read()
-          old = "VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,"
-          new = "static VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateInstance_impl(const VkInstanceCreateInfo *pCreateInfo,"
-          if old not in s:
-              fail(p)
-          s = add_include(s.replace(old, new, 1), p)
-          s += r'''
-          VKAPI_ATTR VkResult VKAPI_CALL
-          mali_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
-                              const VkAllocationCallbacks *pAllocator,
-                              VkInstance *pInstance)
-          {
-             mali_pc_trace("vkCreateInstance: enter, apiVersion 0x%x, %u extensions",
-                           pCreateInfo->pApplicationInfo ? pCreateInfo->pApplicationInfo->apiVersion : 0u,
-                           pCreateInfo->enabledExtensionCount);
-             for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
-                mali_pc_trace("  instance extension: %s", pCreateInfo->ppEnabledExtensionNames[i]);
-             VkResult r = mali_CreateInstance_impl(pCreateInfo, pAllocator, pInstance);
-             mali_pc_trace("vkCreateInstance: result %d", (int)r);
-             return r;
-          }
-          '''.replace("\n          ", "\n")
-          open(p, "w").write(s)
-          print("patched:", p)
-
-          # physical device enumeration
-          p = "src/vk/mali_physical_device.c"
-          s = open(p).read()
-          edits = [
-              ("   struct mali_instance *instance = container_of(vk_instance, struct mali_instance, vk);\n   const bool os_backend",
-               "   struct mali_instance *instance = container_of(vk_instance, struct mali_instance, vk);\n   mali_pc_trace(\"enumerate physical devices: enter\");\n   const bool os_backend"),
-              ("      VkResult result = physical_device_create(instance, path, &pdev);\n",
-               "      VkResult result = physical_device_create(instance, path, &pdev);\n      mali_pc_trace(\"physical_device_create(%s) -> %d\", path, (int)result);\n"),
-              ("   }\n   return VK_SUCCESS;\n}\n\nvoid\nmali_physical_device_destroy(",
-               "   }\n   mali_pc_trace(\"enumerate physical devices: done\");\n   return VK_SUCCESS;\n}\n\nvoid\nmali_physical_device_destroy("),
-          ]
-          for old, new in edits:
-              if old not in s:
-                  fail(p)
-              s = s.replace(old, new, 1)
-          open(p, "w").write(add_include(s, p))
-          print("patched:", p)
-
-          # vkCreateDevice
-          p = "src/vk/mali_device.c"
-          s = open(p).read()
-          old = "VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateDevice(VkPhysicalDevice physicalDevice,"
-          new = "static VKAPI_ATTR VkResult VKAPI_CALL\nmali_CreateDevice_impl(VkPhysicalDevice physicalDevice,"
-          if old not in s:
-              fail(p)
-          s = add_include(s.replace(old, new, 1), p)
-          s += r'''
-          VKAPI_ATTR VkResult VKAPI_CALL
-          mali_CreateDevice(VkPhysicalDevice physicalDevice,
-                            const VkDeviceCreateInfo *pCreateInfo,
-                            const VkAllocationCallbacks *pAllocator,
-                            VkDevice *pDevice)
-          {
-             mali_pc_trace("vkCreateDevice: enter, %u extensions", pCreateInfo->enabledExtensionCount);
-             for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
-                mali_pc_trace("  device extension: %s", pCreateInfo->ppEnabledExtensionNames[i]);
-             VkResult r = mali_CreateDevice_impl(physicalDevice, pCreateInfo, pAllocator, pDevice);
-             mali_pc_trace("vkCreateDevice: result %d", (int)r);
-             return r;
-          }
-          '''.replace("\n          ", "\n")
-          open(p, "w").write(s)
-          print("patched:", p)
-          PY
-
-      - name: Patch 4 - extensions & DXVK/Vita features
-        run: |
-          python3 - <<'PY'
-          import sys
-          p = "src/vk/mali_physical_device.c"
-          s = open(p).read()
-          edits = [
-              ("static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n",
-               "static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n   /* malisx pc: mirror-clamp is handled in mali_sampler.c; the divisor is\n    * applied by the v7 draw code (b->divisor). */\n   .KHR_sampler_mirror_clamp_to_edge = true,\n   .EXT_vertex_attribute_divisor = true,\n"),
-              ("   *f = (struct vk_features) {\n",
-               "   *f = (struct vk_features) {\n      /* malisx pc: VK_EXT_vertex_attribute_divisor. Zero divisor stays off. */\n      .vertexAttributeInstanceRateDivisor = true,\n      .vertexAttributeInstanceRateZeroDivisor = false,\n      /* malisx pc: Robust buffer access required for DXVK/Emulators */\n      .robustBufferAccess = true,\n"),
-              ("   *props = (struct vk_properties) {\n",
-               "   *props = (struct vk_properties) {\n      .maxVertexAttribDivisor = 0xffffffffu,\n"),
-          ]
-          for old, new in edits:
-              if s.count(old) != 1:
-                  sys.exit("PATCH FAILED: anchor found %d times in %s:\n%s" % (s.count(old), p, old))
-              s = s.replace(old, new, 1)
-          open(p, "w").write(s)
-          print("patched:", p)
-          PY
-          git status --short
-
-      - name: Fetch pinned Mesa
-        run: |
-          MESA_COMMIT=$(sed -n "s/^mesa_commit = '\(.*\)'/\1/p" meson.build)
-          echo "Mesa commit: $MESA_COMMIT"
-          git init mesa
-          git -C mesa fetch --depth 1 https://github.com/bmdhacks/armsx2-turnip.git "$MESA_COMMIT"
-          git -C mesa checkout FETCH_HEAD
-
-      - name: Host packages
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libclang-dev clang python3-pip zip binutils
-          pip install --break-system-packages "meson>=1.7" mako pyyaml
-
-      - name: Rust toolchain
-        run: |
-          rustup update stable
+          sudo apt-get install -y \
+            meson ninja-build python3-pip python3-mako python3-yaml python3-ply \
+            clang llvm-18-dev libclang-18-dev spirv-tools glslang-tools \
+            libdrm-dev libelf-dev flex bison zip unzip wget git pkg-config \
+            patchelf rustc cargo
           rustup target add aarch64-linux-android
-          rustc --version
 
-      - name: Cache bindgen
-        id: bindgen-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/bindgen
-          key: bindgen-0.71.1-${{ runner.os }}
-
-      - name: Install bindgen 0.71.1
-        if: steps.bindgen-cache.outputs.cache-hit != 'true'
-        run: cargo install bindgen-cli --version 0.71.1 --locked
-
-      - name: Android NDK r28c
+      - name: Download & Extract Android NDK
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
-          ls "$ANDROID_HOME/ndk/$NDK_VERSION"
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
 
-      - name: Configure
+      - name: Clone Malisx / PanVK Source
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
-          grep '^ndk' cross-ci.ini
-          meson setup build-android --cross-file cross-ci.ini
+          git clone --depth 1 --branch "${{ github.event.inputs.source_ref || 'main' }}" \
+            "${{ github.event.inputs.source_repo || 'https://github.com/bmdhacks/malisx2.git' }}" mesa-src
 
-      - name: Build
+      - name: Apply Custom Patches (If Present)
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          ninja -C build-android
+          if [ -d "patches" ] && [ -n "$(ls -A patches/*.patch 2>/dev/null)" ]; then
+            echo "Applying custom patches..."
+            cd mesa-src
+            for p in ../patches/*.patch; do
+              echo "Applying $p"
+              git apply --whitespace=nowarn "$p"
+            done
+          else
+            echo "No custom patches found in patches/ directory."
+          fi
 
-      - name: Download missing libdrm.so.2 dependency for packaging
+      - name: Build Host Panfrost Offline Shader Compiler (CLC)
         run: |
-          mkdir -p libdrm_extract
-          cd libdrm_extract
-          # Fetch aarch64 libdrm debian package to extract libdrm.so.2
-          apt-get download libdrm2
-          dpkg-deb -x *.deb .
-          # Locate libdrm.so.2
-          find . -name "libdrm.so.2*"
+          meson setup build-host mesa-src \
+            -Dplatforms= \
+            -Dgallium-drivers=panfrost \
+            -Dvulkan-drivers= \
+            -Dtools=panfrost \
+            -Dllvm=enabled
+          ninja -C build-host src/panfrost/clc/panfrost_compile
 
-      - name: Package flat driver zips with libdrm bundle
+      - name: Generate Android NDK Meson Cross-File with Vita3K / Mali-G52 Flags
         run: |
-          TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          for V in main fallback; do
-            mkdir -p out-$V
-            "$TC/llvm-strip" -o out-$V/libvulkan_panfrost.so build-android/src/libvulkan_malisx2.so
-            # Copy extracted libdrm.so.2 into the driver package directory structure
-            LIBDRM_PATH=$(find libdrm_extract -name "libdrm.so.2*" | head -n 1)
-            if [ -n "$LIBDRM_PATH" ]; then
-              cp "$LIBDRM_PATH" out-$V/libdrm.so.2
-            fi
-          done
-          python3 - "$BUILD_NO" <<'PY'
-          import json, sys
-          b = sys.argv[1]
-          base = {
-              "schemaVersion": 1,
-              "vendor": "Mesa",
-              "driverVersion": "Vulkan 1.3.363",
-              "minApi": 31,
-              "libraryName": "libvulkan_panfrost.so",
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cat << EOF > android-aarch64.txt
+          [binaries]
+          c = '$TOOLCHAIN/aarch64-linux-android${{ env.ANDROID_API }}-clang'
+          cpp = '$TOOLCHAIN/aarch64-linux-android${{ env.ANDROID_API }}-clang++'
+          ar = '$TOOLCHAIN/llvm-ar'
+          strip = '$TOOLCHAIN/llvm-strip'
+          pkgconfig = 'pkg-config'
+
+          [built-in options]
+          c_args = [
+            '-Wno-error=incompatible-function-pointer-types', 
+            '-Wno-error=int-conversion', 
+            '-DANDROID', 
+            '-D__ANDROID_API__=${{ env.ANDROID_API }}',
+            '-DPAN_FORCE_IDVS=1'
+          ]
+          cpp_args = [
+            '-Wno-error=incompatible-function-pointer-types', 
+            '-Wno-error=int-conversion', 
+            '-DANDROID', 
+            '-D__ANDROID_API__=${{ env.ANDROID_API }}',
+            '-DPAN_FORCE_IDVS=1'
+          ]
+          c_link_args = ['-static-libstdc++', '-llog', '-ldl', '-lm', '-lc']
+          cpp_link_args = ['-static-libstdc++', '-llog', '-ldl', '-lm', '-lc']
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'armv8-a'
+          endian = 'little'
+          EOF
+
+      - name: Configure PanVK for Android (mali_kbase)
+        run: |
+          export PATH="$PWD/build-host/src/panfrost/clc:$PATH"
+          meson setup build-android mesa-src \
+            --cross-file android-aarch64.txt \
+            --buildtype=${{ github.event.inputs.build_type || 'release' }} \
+            -Dstrip=true \
+            -Dplatforms=android \
+            -Dplatform-sdk-version=${{ env.ANDROID_API }} \
+            -Dandroid-stub=true \
+            -Dgallium-drivers= \
+            -Dvulkan-drivers=panfrost \
+            -Dfreedreno-kmds= \
+            -Dllvm=disabled \
+            -Degl=disabled \
+            -Dgles1=disabled \
+            -Dgles2=disabled \
+            -Dopengl=false \
+            -Dshared-glapi=disabled \
+            -Dbuild-tests=false \
+            -Dvalgrind=disabled \
+            -Dlibunwind=disabled \
+            -Dlmsensors=disabled \
+            -Dzstd=disabled
+
+      - name: Compile Android Vulkan Driver (.so)
+        run: |
+          export PATH="$PWD/build-host/src/panfrost/clc:$PATH"
+          ninja -C build-android src/panfrost/vulkan/libvulkan_panfrost.so
+
+      - name: Fix SONAME & Package Adrenotools ZIP
+        run: |
+          mkdir -p package
+          cp build-android/src/panfrost/vulkan/libvulkan_panfrost.so package/vulkan.panvk.so
+          patchelf --set-soname vulkan.panvk.so package/vulkan.panvk.so
+
+          SHORT_SHA=$(cd mesa-src && git rev-parse --short HEAD)
+          VER_TAG="${{ github.event.inputs.driver_version || 'v0.2-vita-opt' }}-${SHORT_SHA}"
+
+          cat << EOF > package/meta.json
+          {
+            "schemaVersion": 1,
+            "name": "${{ github.event.inputs.driver_name || 'Malisx PanVK (Vita3K / Mali-G52)' }}",
+            "description": "Custom PanVK mali_kbase build optimized for Vita3K and Bifrost GPUs",
+            "author": "${{ github.repository_owner }}",
+            "packageVersion": "1",
+            "vendor": "Mesa",
+            "driverVersion": "${VER_TAG}",
+            "minApi": ${{ env.ANDROID_API }},
+            "libraryName": "vulkan.panvk.so"
           }
-          main = dict(base)
-          main.update({
-              "name": "malisx pc build " + b,
-              "description": "malisx pc build " + b + ": Mali-G52 driver optimized for DX9 and Vita emulation",
-              "author": "malisx pc (fork of malisx2 by bmdhacks)",
-              "packageVersion": b,
-          })
-          json.dump(main, open("out-main/meta.json", "w"), indent=2)
-          fb = dict(base)
-          fb.update({
-              "name": "LOADER-TEST malisx2 lib",
-              "description": "LOADER TEST ONLY: malisx2 library in Jim-style metadata",
-              "author": "malisx-pc loader test",
-              "packageVersion": "11",
-          })
-          json.dump(fb, open("out-fallback/meta.json", "w"), indent=2)
-          PY
-          (cd out-main && zip -9 "../malisx-pc-build-$BUILD_NO.zip" libvulkan_panfrost.so meta.json $([ -f libdrm.so.2 ] && echo "libdrm.so.2"))
-          (cd out-fallback && zip -9 "../malisx-pc-build-$BUILD_NO-fallback.zip" libvulkan_panfrost.so meta.json $([ -f libdrm.so.2 ] && echo "libdrm.so.2"))
-          sha256sum malisx-pc-build-*.zip | tee SHA256SUMS.txt
+          EOF
 
-      - name: Publish release (flat zips)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "malisx-pc-build-$BUILD_NO-run${{ github.run_number }}" \
-            malisx-pc-build-*.zip SHA256SUMS.txt \
-            --prerelease --title "malisx pc build $BUILD_NO" \
-            --notes "Install malisx-pc-build-$BUILD_NO.zip directly. Bundles libdrm.so.2 to resolve dlopen linking issues. Commit $GITHUB_SHA."
-            
+          ZIP_NAME="Malisx-PanVK-${VER_TAG}.zip"
+          (cd package && zip -r "../${ZIP_NAME}" vulkan.panvk.so meta.json)
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+
+      - name: Upload Driver ZIP Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          
