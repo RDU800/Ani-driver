@@ -7,18 +7,8 @@ emulator, which loads it in place of the system driver. It implements what
 ARMSX2 and the Android Vulkan loader use; every other entry point logs and
 fails.
 
-Target: Mali-G615 (Mesa architecture v11, command-stream frontend), on the
-Anbernic RG 477V. The same library serves every GPU of the architectures
-it is built for, picked by the GPU's architecture when the device is
-created: v11 (Mali-G615, G715), v10 (Mali-G310, G510, G610, G710;
-command-stream frontend), v9 (Mali-G57, G68, G77, G78, G78AE; job
-manager) and v7 (Mali-G31, G51, G52, G76; job manager). Most of these have
-not been tried by us. Per-part values (tile buffer sizes, anisotropic
-filtering, the Bifrost compiler's instruction forms) come from Mesa's GPU
-model table. Shaders are compiled with Mesa's kraid compiler (Mesa's
-Bifrost compiler on v7); the driver is built on Mesa's shared Vulkan
-runtime. Midgard, the arch 6 Bifrost parts (G71, G72) and arch 12 on
-(G720 and later) are not served.
+Target: Mali-g52 MC2, on the
+redmi 14c
 
 ## Building
 
