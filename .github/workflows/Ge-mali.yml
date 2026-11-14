@@ -85,15 +85,17 @@ jobs:
           print("patched:", p)
           PY
 
-      - name: Patch 2 - log file helper
+      - name: Patch 2 - log file helper & Core Affinity Pinning
         run: |
           python3 - <<'PY'
           import os, sys
           build = os.environ["BUILD_NO"]
-          header = r'''/* malisx pc: file log and call trace. Header only. */
+          header = r'''/* malisx pc: file log, call trace, and A75 core affinity helper. */
           #ifndef MALI_PC_TRACE_H
           #define MALI_PC_TRACE_H
 
+          #define _GNU_SOURCE
+          #include <sched.h>
           #include <stdarg.h>
           #include <stdio.h>
           #include <unistd.h>
@@ -127,6 +129,17 @@ jobs:
              mali_pc_filelog(buf);
           }
 
+          static inline void
+          mali_pc_pin_to_performance_cores(void)
+          {
+             cpu_set_t cpuset;
+             CPU_ZERO(&cpuset);
+             /* Pin thread to big Cortex-A75 performance cores (typically cores 6 & 7 on 8-core ARM SoCs) */
+             CPU_SET(6, &cpuset);
+             CPU_SET(7, &cpuset);
+             sched_setaffinity(0, sizeof(cpuset), &cpuset);
+          }
+
           #endif
           '''
           header = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in header.split("\n"))
@@ -154,6 +167,7 @@ jobs:
           static void __attribute__((constructor))
           mali_pc_loaded(void)
           {
+             mali_pc_pin_to_performance_cores();
              char cmd[256] = "?";
              FILE *f = fopen("/proc/self/cmdline", "r");
              if (f) {
@@ -162,7 +176,7 @@ jobs:
                 fclose(f);
              }
              char line[400];
-             snprintf(line, sizeof(line), "malisx pc build BUILDNO loaded in %s", cmd);
+             snprintf(line, sizeof(line), "malisx pc build BUILDNO pinned to A75 cores and loaded in %s", cmd);
              mali_pc_filelog(line);
           }
           '''.replace("BUILDNO", build)
@@ -281,7 +295,7 @@ jobs:
           print("patched:", p)
           PY
 
-      - name: Patch 5 - Dynamic RAM/VRAM profiler and UMA heap sizing (with stdbool.h fix)
+      - name: Patch 5 - Dynamic RAM/VRAM profiler and UMA heap sizing
         run: |
           python3 - <<'PY'
           import sys
@@ -427,40 +441,18 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
           ls "$ANDROID_HOME/ndk/$NDK_VERSION"
 
-      - name: Configure
+      - name: Configure with Maximum Performance & Fast-Math Flags
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
           
-          python3 -c "
-          import configparser
-          config = configparser.ConfigParser(allow_no_value=True, delimiters=('='))
-          config.optionxform = str
-          config.read('cross-ci.ini')
-          
-          for opt in ['c_args', 'cpp_args']:
-              if config.has_option('built-in options', opt):
-                  val = config.get('built-in options', opt).strip()
-                  if val.startswith('[') and val.endswith(']'):
-                      val = val[1:-1].strip()
-                  new_flags = \"'-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1'\"
-                  if val:
-                      updated = f\"[{val}, {new_flags}]\"
-                  else:
-                      updated = f\"[{new_flags}]\"
-                  config.set('built-in options', opt, updated)
-          
-          with open('cross-ci.ini', 'w' as f:
-              config.write(f, space_around_delimiters=False)
-          " || true
-          
-          # Fallback direct insertion if configparser escapes incorrectly
+          # Inject -O3, IDVS geometry, vertex cache, FP16 vector packing, and aggressive fast-math
           python3 -c "
           with open('cross-ci.ini', 'r') as f:
               c = f.read()
           if 'PAN_FORCE_IDVS' not in c:
-              c = c.replace('c_args = [', \"c_args = ['-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1', \")
-              c = c.replace('cpp_args = [', \"cpp_args = ['-O3', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1', \")
+              c = c.replace('c_args = [', \"c_args = ['-O3', '-ffast-math', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1', \")
+              c = c.replace('cpp_args = [', \"cpp_args = ['-O3', '-ffast-math', '-DPAN_FORCE_IDVS=1', '-DPAN_FAST_VERTEX_CACHE=1', '-DPAN_PREFER_FP16=1', \")
           with open('cross-ci.ini', 'w') as f:
               f.write(c)
           "
@@ -476,8 +468,22 @@ jobs:
         run: |
           TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
           
-          # Dynamically locate the compiled .so file across build directories
           SO_FILE=$(find build-android -name "libvulkan_*.so" | head -n 1)
           if [ -z "$SO_FILE" ]; then
              echo "ERROR: Compiled Vulkan shared library not found!"
-   
+             exit 1
+          fi
+          echo "Found compiled library at: $SO_FILE"
+
+          for V in main fallback; do
+            mkdir -p out-$V
+            "$TC/llvm-strip" -o out-$V/libvulkan_panfrost.so "$SO_FILE"
+          done
+
+          python3 - "$BUILD_NO" <<'PY'
+          import json, sys
+          b = sys.argv[1]
+          base = {
+              "schemaVersion": 1,
+              "vendor": "Mesa",
+    
