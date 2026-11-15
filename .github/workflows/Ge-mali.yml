@@ -456,9 +456,4 @@ jobs:
               "libraryName": "libvulkan_malisx2.so",
           }
           json.dump(meta, open("out/meta.json", "w"), indent=2)
-                - name: Package driver zip
-        run: |
-          cd out
-          zip -j "../${{ env.ZIP_SLUG }}-build${{ env.BUILD_NO }}.zip" libvulkan_malisx2.so meta.json
-          cd ..
-          echo "Created archive: ${{ env.ZIP_SLUG }}-build${{ env.BUILD_NO }}.zip" 
+  
