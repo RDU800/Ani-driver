@@ -9,11 +9,17 @@ I do need to mention the what this is forked from. This is forked from malisx2 b
 
 Ok, I am aiming to make this driver cable of running most of the emulators with good performace.
 my platform order woulld be
+
 1.Vita(Vita3k plus)
+
 2.Gamecube and wii(Dolphin)
+
 3.Xbox(Hakux mali) already running well. just need to add some improvements.
+
 4.Wii U
+
 5.Switch(Lemon lite)
+
 obviously no psp or ps2. because malisx already handels them better than this.
 Vita as of writting this is ahead of malisx 0.5 by 4 fps.
 Dolphin dosen't open f-zero gx. I only tried that game for now.
@@ -23,5 +29,5 @@ for switch, ran celete with heavy flickering.
 
 I do make this with the help of AI. I read reports, The code and builds and tests and give off ideas. while claude writes the code.
 You could say AI is used on this project. 
-This driver is tested and build upon bifrost v7 architecture. I dpn't know whether thus would work on valhall or not. I only test this on my device and, so.... proceed with caution.
+This driver is tested and build upon bifrost v7 architecture. I don't know whether this would work on valhall or not. I only tested this on my device and, so.... proceed with caution.
 
