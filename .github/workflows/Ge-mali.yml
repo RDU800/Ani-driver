@@ -10,7 +10,7 @@ env:
   NDK_VERSION: 28.2.13676358
   DRIVER_NAME: "Ani's emulator panvk"
   ZIP_SLUG: "anis-emulator-panvk"
-  BUILD_NO: "1"
+  BUILD_NO: "2"
 
 jobs:
   android:
@@ -168,7 +168,175 @@ jobs:
           open(p, "w").write(head + marker + helper + tail)
           print("patched:", p)
           PY
-          git status --short
+
+      - name: Patch 3 - render target diagnostics
+        run: |
+          python3 - <<'PY'
+          import sys
+          p = "src/vk/mali_image.c"
+          s = open(p).read()
+
+          old = "static uint64_t\nchoose_modifier(const struct mali_image *image,"
+          new = "static uint64_t\nchoose_modifier_impl(const struct mali_image *image,"
+          anchor = "   return DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED;\n}\n"
+          if s.count(old) != 1 or s.count(anchor) != 1:
+              sys.exit("PATCH FAILED: choose_modifier anchors not found in " + p)
+          s = s.replace(old, new, 1)
+
+          diag = r"""
+          /* Ani's emulator panvk diagnostics: for every colour or depth target, log
+           * whether it got AFBC compression and, if not, the first rule that said
+           * no. Read with: logcat -s MESA, or in a bug report (lines start with
+           * "AniPanvk"). Nothing here changes which modifier is chosen. */
+          #include <pthread.h>
+
+          static const char *
+          pc_afbc_reason(const struct mali_image *image, const enum pipe_format *formats,
+                         unsigned arch, const VkImageCreateInfo *info)
+          {
+             const VkImageUsageFlags usage = image->vk.usage | image->vk.stencil_usage;
+             if (arch != 7)
+                return "not-v7";
+             if (!(usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+                return vk_format_is_depth_or_stencil(image->vk.format) ? "v7-depth-never" : "no-colour-usage";
+             if (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+                return "usage-depth-stencil";
+             if (usage & VK_IMAGE_USAGE_STORAGE_BIT)
+                return "usage-storage";
+             if (usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT)
+                return "usage-host-transfer";
+             if (image->plane_count != 1)
+                return "multi-plane";
+             if (vk_format_is_depth_or_stencil(image->vk.format))
+                return "depth-format";
+             if (!v7_afbc_format(formats[0]))
+                return "format-not-8bit-rgba";
+             if (image->vk.create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
+                return "flag-mutable-format";
+             if (image->vk.create_flags & VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT)
+                return "flag-block-texel-view";
+             if (image->vk.create_flags & VK_IMAGE_CREATE_ALIAS_BIT)
+                return "flag-alias";
+             if (image->vk.create_flags & VK_IMAGE_CREATE_DISJOINT_BIT)
+                return "flag-disjoint";
+             if (image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                           VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+                                           VK_IMAGE_CREATE_SPARSE_ALIASED_BIT))
+                return "flag-sparse";
+             if (image->vk.tiling != VK_IMAGE_TILING_OPTIMAL)
+                return "tiling-not-optimal";
+             if (image->vk.image_type != VK_IMAGE_TYPE_2D)
+                return "not-2d";
+             if (image->vk.samples != 1)
+                return "multisampled";
+             if (image->vk.mip_levels != 1)
+                return "mip-levels";
+             if (image->vk.array_layers != 1)
+                return "array-layers";
+             if (external_memory(info))
+                return "external-or-swapchain";
+             const unsigned min = mali_afbc_min_extent(formats[0]);
+             if (image->vk.extent.width < min || image->vk.extent.height < min)
+                return "too-small";
+             return "other";
+          }
+
+          struct pc_img_key {
+             int fmt;
+             uint32_t usage, flags, samples;
+             uint64_t mod;
+             char why[32];
+             uint32_t count;
+          };
+
+          static struct pc_img_key pc_keys[128];
+          static unsigned pc_nkeys;
+          static unsigned pc_total;
+          static uint64_t pc_px[3]; /* colour compressed, colour plain, depth/stencil */
+          static pthread_mutex_t pc_lock = PTHREAD_MUTEX_INITIALIZER;
+
+          static void
+          pc_log_image(const struct mali_image *image, const enum pipe_format *formats,
+                       unsigned arch, const VkImageCreateInfo *info, uint64_t mod)
+          {
+             const VkImageUsageFlags usage = image->vk.usage | image->vk.stencil_usage;
+             if (!(usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))
+                return;
+             const bool comp = mod == MALI_MOD_AFBC || mod == MALI_MOD_AFBC_YTR;
+             const bool ds = vk_format_is_depth_or_stencil(image->vk.format);
+             const char *why = comp ? "compressed" : pc_afbc_reason(image, formats, arch, info);
+             const uint64_t px = (uint64_t)image->vk.extent.width * image->vk.extent.height *
+                                 image->vk.array_layers * image->vk.samples;
+             char buf[400];
+             bool print = false;
+             pthread_mutex_lock(&pc_lock);
+             pc_px[ds ? 2 : (comp ? 0 : 1)] += px;
+             pc_total++;
+             unsigned k;
+             for (k = 0; k < pc_nkeys; k++) {
+                const struct pc_img_key *e = &pc_keys[k];
+                if (e->fmt == (int)image->vk.format && e->usage == (uint32_t)usage &&
+                    e->flags == (uint32_t)image->vk.create_flags &&
+                    e->samples == (uint32_t)image->vk.samples && e->mod == mod &&
+                    strcmp(e->why, why) == 0)
+                   break;
+             }
+             if (k == pc_nkeys && pc_nkeys < 128) {
+                struct pc_img_key *e = &pc_keys[pc_nkeys++];
+                e->fmt = (int)image->vk.format;
+                e->usage = (uint32_t)usage;
+                e->flags = (uint32_t)image->vk.create_flags;
+                e->samples = (uint32_t)image->vk.samples;
+                e->mod = mod;
+                snprintf(e->why, sizeof(e->why), "%s", why);
+                e->count = 0;
+             }
+             if (k < pc_nkeys) {
+                pc_keys[k].count++;
+                if (pc_keys[k].count == 1 || pc_keys[k].count == 100 || pc_keys[k].count == 1000)
+                   print = true;
+             }
+             if (print) {
+                snprintf(buf, sizeof(buf),
+                         "AniPanvk target: vkfmt=%d pipe=%s %ux%u layers=%u samples=%u usage=0x%x "
+                         "flags=0x%x tiling=%d -> %s (%s) [seen %u]",
+                         (int)image->vk.format, util_format_short_name(formats[0]),
+                         image->vk.extent.width, image->vk.extent.height, image->vk.array_layers,
+                         (unsigned)image->vk.samples, (unsigned)usage,
+                         (unsigned)image->vk.create_flags, (int)image->vk.tiling,
+                         comp ? "AFBC" : "plain", why, k < pc_nkeys ? pc_keys[k].count : 1u);
+                mesa_logi("%s", buf);
+                mali_pc_filelog(buf);
+             }
+             if (pc_total % 50 == 0) {
+                snprintf(buf, sizeof(buf),
+                         "AniPanvk summary after %u targets: colour AFBC %llu kpx, colour plain %llu kpx, "
+                         "depth/stencil %llu kpx",
+                         pc_total, (unsigned long long)(pc_px[0] / 1000),
+                         (unsigned long long)(pc_px[1] / 1000), (unsigned long long)(pc_px[2] / 1000));
+                mesa_logi("%s", buf);
+                mali_pc_filelog(buf);
+             }
+             pthread_mutex_unlock(&pc_lock);
+          }
+
+          static uint64_t
+          choose_modifier(const struct mali_image *image, const enum pipe_format *formats,
+                          unsigned arch, const VkImageCreateInfo *info)
+          {
+             const uint64_t mod = choose_modifier_impl(image, formats, arch, info);
+             pc_log_image(image, formats, arch, info, mod);
+             return mod;
+          }
+          """
+          s = s.replace(anchor, anchor + diag, 1)
+
+          k = s.find('#include "')
+          s = s[:k] + '#include "mali_pc_trace.h"\n' + s[k:]
+          open(p, "w").write(s)
+          print("patched:", p)
+          PY
 
       - name: Fetch pinned Mesa
         run: |
@@ -241,6 +409,7 @@ jobs:
             echo "$EXPORTS" | grep -qw "$sym" || { echo "FAIL: missing export $sym"; FAIL=1; }
           done
           strings -n 6 "$SO" | grep -q "ani-build$BUILD_NO" || { echo "FAIL: build label ani-build$BUILD_NO not found in the library"; FAIL=1; }
+          strings -n 6 "$SO" | grep -q "AniPanvk target" || { echo "FAIL: diagnostics text not found in the library"; FAIL=1; }
           [ "$FAIL" = 0 ] && echo "VERIFY OK" || exit 1
 
       - name: Package flat driver zip
@@ -255,7 +424,7 @@ jobs:
           meta = {
               "schemaVersion": 1,
               "name": n + " build " + b,
-              "description": n + " build " + b + ": malisx2-based Vulkan driver for Mali (kbase), for emulators",
+              "description": n + " build " + b + ": malisx2-based Vulkan driver for Mali (kbase), for emulators (diagnostic)",
               "author": n + " (fork of malisx2 by bmdhacks)",
               "packageVersion": b,
               "vendor": n,
@@ -273,8 +442,8 @@ jobs:
             echo ""
             echo "- zip: \`$ZIP\` ($(du -h "$ZIP" | cut -f1))"
             echo "- sha256: \`$(sha256sum "$ZIP" | cut -d' ' -f1)\`"
-            echo "- library check: passed (aarch64, only liblog/libm/libdl/libc, loader exports present, build label stamped)"
-            echo "- patches: nested vkMapMemory tolerated; optional log file (off unless Download/anis-panvk.log exists)"
+            echo "- library check: passed (aarch64, only liblog/libm/libdl/libc, loader exports present, build label and diagnostics stamped)"
+            echo "- patches: nested vkMapMemory tolerated; optional log file; render-target compression diagnostics (lines start with AniPanvk)"
             echo "- source commit: \`$GITHUB_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -285,4 +454,4 @@ jobs:
           gh release create "$ZIP_SLUG-build-$BUILD_NO-run${{ github.run_number }}" \
             "$ZIP_SLUG-build-$BUILD_NO.zip" SHA256SUMS.txt \
             --prerelease --title "$DRIVER_NAME build $BUILD_NO" \
-            --notes "Install the zip as it is. To log calls the driver does not implement, create an empty file Download/anis-panvk.log before starting the emulator. Commit $GITHUB_SHA."
+            --notes "Diagnostic build: behaviour is unchanged. Lines starting with AniPanvk in the system log show which render targets get compression. Commit $GITHUB_SHA."
