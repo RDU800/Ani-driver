@@ -452,4 +452,30 @@ jobs:
           python3 - <<'PY'
           import json, os
           b = os.environ["BUILD_NO"]
+          slug = os.environ.get("ZIP_SLUG", "ani-driver")
+          
+          meta = {
+              "schema_version": 1,
+              "name": os.environ.get("DRIVER_NAME", "ani-driver"),
+              "version": f"ani-driver-build{b}",
+              "library_name": "libvulkan_malisx2.so"
+          }
+          
+          with open("out/meta.json", "w") as f:
+              json.dump(meta, f, indent=2)
+          print("Generated out/meta.json successfully.")
+          PY
+          
+          cd out
+          ZIP_NAME="${ZIP_SLUG}-build${BUILD_NO}.zip"
+          zip -j "$ZIP_NAME" libvulkan_malisx2.so meta.json
+          echo "Created archive: $ZIP_NAME"
+          ls -la
+
+      - name: Upload driver artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_SLUG }}-build${{ env.BUILD_NO }}
+          path: out/*.zip
+          
           
