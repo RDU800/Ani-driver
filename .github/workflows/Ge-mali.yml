@@ -10,7 +10,7 @@ env:
   NDK_VERSION: 28.2.13676358
   DRIVER_NAME: "ani-driver"
   ZIP_SLUG: "ani-driver"
-  BUILD_NO: "1"
+  BUILD_NO: "2"
   BUILD_TYPE: "release"
 
 jobs:
@@ -94,19 +94,26 @@ jobs:
           import os, sys
           build = os.environ["BUILD_NO"]
           header = r'''/* ani-driver: diagnostics output. Header only.
-           * Every line goes to stderr (Vita3K+ keeps it in panvk_log.txt) and, if
-           * /sdcard/Download/ani-driver.log already exists, to that file too. */
+           * Every line goes to stderr (Vita3K+ keeps it in panvk_log.txt), to logcat
+           * under the tag "ani-driver" and, if /sdcard/Download/ani-driver.log
+           * already exists, to that file too. */
           #ifndef MALI_PC_TRACE_H
           #define MALI_PC_TRACE_H
 
           #include <stdarg.h>
           #include <stdio.h>
           #include <unistd.h>
+          #ifdef __ANDROID__
+          #include <android/log.h>
+          #endif
 
           static inline void
           mali_pc_filelog(const char *line)
           {
              fprintf(stderr, "[ani-driver] %s\n", line);
+          #ifdef __ANDROID__
+             __android_log_write(ANDROID_LOG_INFO, "ani-driver", line);
+          #endif
              static const char *const paths[] = {
                 "/sdcard/Download/ani-driver.log",
                 "/storage/emulated/0/Download/ani-driver.log",
@@ -342,7 +349,7 @@ jobs:
           print("patched:", p)
           PY
 
-      - name: Patch 4 - float controls and mirror clamp
+      - name: Patch 4 - extensions
         run: |
           python3 - <<'PY'
           import sys
@@ -350,7 +357,9 @@ jobs:
           s = open(p).read()
           edits = [
               ("static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n",
-               "static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n   /* ani-driver: sampler.c already handles mirror-clamp; the compiler keeps\n    * denormals by default (see ftz_mode in mali_shader.c). Vita3K turns its\n    * half-float denormal emulation off when float controls are present. */\n   .KHR_sampler_mirror_clamp_to_edge = true,\n   .KHR_shader_float_controls = true,\n"),
+               "static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n   /* ani-driver: sampler.c already handles mirror-clamp; the compiler keeps\n    * denormals by default (see ftz_mode in mali_shader.c). Vita3K turns its\n    * half-float denormal emulation off when float controls are present. */\n   .KHR_sampler_mirror_clamp_to_edge = true,\n   .KHR_shader_float_controls = true,\n   /* mali_pipeline.c already returns VK_PIPELINE_COMPILE_REQUIRED for the\n    * fail-on-compile flag; Vita3K's async compile path relies on it. */\n   .EXT_pipeline_creation_cache_control = true,\n"),
+              ("   *f = (struct vk_features) {\n",
+               "   *f = (struct vk_features) {\n      .pipelineCreationCacheControl = true,\n"),
               ("   *props = (struct vk_properties) {\n",
                "   *props = (struct vk_properties) {\n      .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,\n      .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,\n      .shaderDenormPreserveFloat16 = true,\n      .shaderDenormPreserveFloat32 = true,\n"),
           ]
@@ -437,34 +446,10 @@ jobs:
 
       - name: Package flat driver zip
         run: |
+          TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
           mkdir -p out
-          cp build-android/src/libvulkan_malisx2.so out/
-          
-          # Generate meta.json inside out/ so zip finds both files
+          "$TC/llvm-strip" -o out/libvulkan_malisx2.so build-android/src/libvulkan_malisx2.so
           python3 - <<'PY'
           import json, os
           b = os.environ["BUILD_NO"]
-          n = os.environ["DRIVER_NAME"]
-          meta = {
-              "schemaVersion": 1,
-              "name": n + " build " + b,
-              "description": n + " build " + b + ": malisx2-based Vulkan driver for Mali G52 (kbase), for emulators",
-              "author": n + " (fork of malisx2 by bmdhacks)",
-              "packageVersion": b,
-              "vendor": n,
-              "driverVersion": "44.1.0",
-              "minApi": 29,
-              "libraryName": "libvulkan_malisx2.so",
-          }
-          json.dump(meta, open("out/meta.json", "w"), indent=2)
-          PY
-
-          cd out
-          zip -j "${{ env.ZIP_SLUG }}-build${{ env.BUILD_NO }}.zip" libvulkan_malisx2.so meta.json
-          ls -la
-
-      - name: Upload driver artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.DRIVER_NAME }}-build${{ env.BUILD_NO }}
-          path: out/${{ env.ZIP_SLUG }}-build${{ env.BUILD_NO }}.zip
+          
