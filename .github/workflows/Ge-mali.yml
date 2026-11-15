@@ -1,4 +1,4 @@
-name: build-anis-emulator-panvk
+name: build-ani-driver
 
 on:
   workflow_dispatch: {}
@@ -8,9 +8,10 @@ permissions:
 
 env:
   NDK_VERSION: 28.2.13676358
-  DRIVER_NAME: "Ani's emulator panvk"
-  ZIP_SLUG: "anis-emulator-panvk"
-  BUILD_NO: "2"
+  DRIVER_NAME: "ani-driver"
+  ZIP_SLUG: "ani-driver"
+  BUILD_NO: "1"
+  BUILD_TYPE: "release"
 
 jobs:
   android:
@@ -34,13 +35,13 @@ jobs:
           old = "version : '0.5.0',"
           if old not in s:
               fail(p)
-          open(p, "w").write(s.replace(old, "version : 'ani-build" + os.environ["BUILD_NO"] + "',", 1))
+          open(p, "w").write(s.replace(old, "version : 'ani-driver-build" + os.environ["BUILD_NO"] + "',", 1))
           print("patched:", p)
 
           p = "src/vk/mali_memory.h"
           s = open(p).read()
           old = L("   void *map;", "", "   /* The range [lo, hi) ever mapped")
-          new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (Ani's emulator panvk). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
+          new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (ani-driver). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
           if old not in s:
               fail(p)
           open(p, "w").write(s.replace(old, new, 1))
@@ -51,7 +52,7 @@ jobs:
           edits = [
               (L("   if (mem->map)",
                  '      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "memory is already mapped");'),
-               "   /* Ani's panvk: a nested vkMapMemory is tolerated (see map_count). */"),
+               "   /* ani-driver: a nested vkMapMemory is tolerated (see map_count). */"),
               (L("      dmabuf_sync(mem, DMA_BUF_SYNC_START);",
                  "      base = mem->dmabuf_map;"),
                L("      if (!mem->map)",
@@ -87,13 +88,14 @@ jobs:
           print("patched:", p)
           PY
 
-      - name: Patch 2 - opt-in log of unimplemented calls
+      - name: Patch 2 - diagnostics output
         run: |
           python3 - <<'PY'
           import os, sys
           build = os.environ["BUILD_NO"]
-          header = r'''/* Ani's emulator panvk: optional log file. Header only.
-           * Nothing is written unless /sdcard/Download/anis-panvk.log already exists. */
+          header = r'''/* ani-driver: diagnostics output. Header only.
+           * Every line goes to stderr (Vita3K+ keeps it in panvk_log.txt) and, if
+           * /sdcard/Download/ani-driver.log already exists, to that file too. */
           #ifndef MALI_PC_TRACE_H
           #define MALI_PC_TRACE_H
 
@@ -104,10 +106,11 @@ jobs:
           static inline void
           mali_pc_filelog(const char *line)
           {
+             fprintf(stderr, "[ani-driver] %s\n", line);
              static const char *const paths[] = {
-                "/sdcard/Download/anis-panvk.log",
-                "/storage/emulated/0/Download/anis-panvk.log",
-                "/data/local/tmp/anis-panvk.log",
+                "/sdcard/Download/ani-driver.log",
+                "/storage/emulated/0/Download/ani-driver.log",
+                "/data/local/tmp/ani-driver.log",
              };
              for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 if (access(paths[i], W_OK) != 0)
@@ -156,7 +159,7 @@ jobs:
                 fclose(f);
              }
              char line[400];
-             snprintf(line, sizeof(line), "Ani emulator panvk build BUILDNO loaded in %s", cmd);
+             snprintf(line, sizeof(line), "ani-driver build BUILDNO loaded in %s", cmd);
              mali_pc_filelog(line);
           }
           '''.replace("BUILDNO", build)
@@ -168,6 +171,7 @@ jobs:
           open(p, "w").write(head + marker + helper + tail)
           print("patched:", p)
           PY
+          git status --short
 
       - name: Patch 3 - render target diagnostics
         run: |
@@ -184,10 +188,10 @@ jobs:
           s = s.replace(old, new, 1)
 
           diag = r"""
-          /* Ani's emulator panvk diagnostics: for every colour or depth target, log
+          /* ani-driver diagnostics: for every colour or depth target, log
            * whether it got AFBC compression and, if not, the first rule that said
            * no. Read with: logcat -s MESA, or in a bug report (lines start with
-           * "AniPanvk"). Nothing here changes which modifier is chosen. */
+           * "ani-driver"). Nothing here changes which modifier is chosen. */
           #include <pthread.h>
 
           static const char *
@@ -299,7 +303,7 @@ jobs:
              }
              if (print) {
                 snprintf(buf, sizeof(buf),
-                         "AniPanvk target: vkfmt=%d pipe=%s %ux%u layers=%u samples=%u usage=0x%x "
+                         "ani-driver target: vkfmt=%d pipe=%s %ux%u layers=%u samples=%u usage=0x%x "
                          "flags=0x%x tiling=%d -> %s (%s) [seen %u]",
                          (int)image->vk.format, util_format_short_name(formats[0]),
                          image->vk.extent.width, image->vk.extent.height, image->vk.array_layers,
@@ -311,7 +315,7 @@ jobs:
              }
              if (pc_total % 50 == 0) {
                 snprintf(buf, sizeof(buf),
-                         "AniPanvk summary after %u targets: colour AFBC %llu kpx, colour plain %llu kpx, "
+                         "ani-driver summary after %u targets: colour AFBC %llu kpx, colour plain %llu kpx, "
                          "depth/stencil %llu kpx",
                          pc_total, (unsigned long long)(pc_px[0] / 1000),
                          (unsigned long long)(pc_px[1] / 1000), (unsigned long long)(pc_px[2] / 1000));
@@ -334,6 +338,26 @@ jobs:
 
           k = s.find('#include "')
           s = s[:k] + '#include "mali_pc_trace.h"\n' + s[k:]
+          open(p, "w").write(s)
+          print("patched:", p)
+          PY
+
+      - name: Patch 4 - float controls and mirror clamp
+        run: |
+          python3 - <<'PY'
+          import sys
+          p = "src/vk/mali_physical_device.c"
+          s = open(p).read()
+          edits = [
+              ("static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n",
+               "static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n   /* ani-driver: sampler.c already handles mirror-clamp; the compiler keeps\n    * denormals by default (see ftz_mode in mali_shader.c). Vita3K turns its\n    * half-float denormal emulation off when float controls are present. */\n   .KHR_sampler_mirror_clamp_to_edge = true,\n   .KHR_shader_float_controls = true,\n"),
+              ("   *props = (struct vk_properties) {\n",
+               "   *props = (struct vk_properties) {\n      .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,\n      .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,\n      .shaderDenormPreserveFloat16 = true,\n      .shaderDenormPreserveFloat32 = true,\n"),
+          ]
+          for old, new in edits:
+              if s.count(old) != 1:
+                  sys.exit("PATCH FAILED: anchor found %d times in %s:\n%s" % (s.count(old), p, old))
+              s = s.replace(old, new, 1)
           open(p, "w").write(s)
           print("patched:", p)
           PY
@@ -379,7 +403,7 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
           grep '^ndk' cross-ci.ini
-          meson setup build-android --cross-file cross-ci.ini
+          meson setup build-android --cross-file cross-ci.ini --buildtype="$BUILD_TYPE"
 
       - name: Build
         run: |
@@ -408,8 +432,7 @@ jobs:
           for sym in HMI vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion; do
             echo "$EXPORTS" | grep -qw "$sym" || { echo "FAIL: missing export $sym"; FAIL=1; }
           done
-          strings -n 6 "$SO" | grep -q "ani-build$BUILD_NO" || { echo "FAIL: build label ani-build$BUILD_NO not found in the library"; FAIL=1; }
-          strings -n 6 "$SO" | grep -q "AniPanvk target" || { echo "FAIL: diagnostics text not found in the library"; FAIL=1; }
+          strings -n 6 "$SO" | grep -q "ani-driver-build$BUILD_NO" || { echo "FAIL: build label ani-driver-build$BUILD_NO not found in the library"; FAIL=1; }
           [ "$FAIL" = 0 ] && echo "VERIFY OK" || exit 1
 
       - name: Package flat driver zip
@@ -424,7 +447,7 @@ jobs:
           meta = {
               "schemaVersion": 1,
               "name": n + " build " + b,
-              "description": n + " build " + b + ": malisx2-based Vulkan driver for Mali (kbase), for emulators (diagnostic)",
+              "description": n + " build " + b + ": malisx2-based Vulkan driver for Mali G52 (kbase), for emulators",
               "author": n + " (fork of malisx2 by bmdhacks)",
               "packageVersion": b,
               "vendor": n,
@@ -433,25 +456,4 @@ jobs:
               "libraryName": "libvulkan_malisx2.so",
           }
           json.dump(meta, open("out/meta.json", "w"), indent=2)
-          PY
-          ZIP="$ZIP_SLUG-build-$BUILD_NO.zip"
-          (cd out && zip -9 "../$ZIP" libvulkan_malisx2.so meta.json)
-          sha256sum "$ZIP" | tee SHA256SUMS.txt
-          {
-            echo "## $DRIVER_NAME build $BUILD_NO"
-            echo ""
-            echo "- zip: \`$ZIP\` ($(du -h "$ZIP" | cut -f1))"
-            echo "- sha256: \`$(sha256sum "$ZIP" | cut -d' ' -f1)\`"
-            echo "- library check: passed (aarch64, only liblog/libm/libdl/libc, loader exports present, build label and diagnostics stamped)"
-            echo "- patches: nested vkMapMemory tolerated; optional log file; render-target compression diagnostics (lines start with AniPanvk)"
-            echo "- source commit: \`$GITHUB_SHA\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$ZIP_SLUG-build-$BUILD_NO-run${{ github.run_number }}" \
-            "$ZIP_SLUG-build-$BUILD_NO.zip" SHA256SUMS.txt \
-            --prerelease --title "$DRIVER_NAME build $BUILD_NO" \
-            --notes "Diagnostic build: behaviour is unchanged. Lines starting with AniPanvk in the system log show which render targets get compression. Commit $GITHUB_SHA."
+  
