@@ -437,9 +437,10 @@ jobs:
 
       - name: Package flat driver zip
         run: |
-          TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
           mkdir -p out
-          "$TC/llvm-strip" -o out/libvulkan_malisx2.so build-android/src/libvulkan_malisx2.so
+          cp build-android/src/libvulkan_malisx2.so out/
+          
+          # Generate meta.json inside out/ so zip finds both files
           python3 - <<'PY'
           import json, os
           b = os.environ["BUILD_NO"]
@@ -456,4 +457,14 @@ jobs:
               "libraryName": "libvulkan_malisx2.so",
           }
           json.dump(meta, open("out/meta.json", "w"), indent=2)
-  
+          PY
+
+          cd out
+          zip -j "${{ env.ZIP_SLUG }}-build${{ env.BUILD_NO }}.zip" libvulkan_malisx2.so meta.json
+          ls -la
+
+      - name: Upload driver artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DRIVER_NAME }}-build${{ env.BUILD_NO }}
+          path: out/${{ env.ZIP_SLUG }}-build${{ env.BUILD_NO }}.zip
