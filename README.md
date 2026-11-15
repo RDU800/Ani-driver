@@ -2,6 +2,7 @@
 
 Target: Mali-g52 MC2, on the
 redmi 14c
+
 This fork started as a way to make malisx run on windows emulators. I got the driver to load into winlator mali plus and ran few test and saw that. Turning this into great pc driver would be a fool's errand. imI have another driver to fork in that mind. Basically this project turned from running pc emulators into every other emulator.
 I do need to mention the what this is forked from. This is forked from malisx2 by bmdhack.
 
