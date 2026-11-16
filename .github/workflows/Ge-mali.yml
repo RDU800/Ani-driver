@@ -10,7 +10,7 @@ env:
   NDK_VERSION: 28.2.13676358
   DRIVER_NAME: "ani-driver"
   ZIP_SLUG: "ani-driver"
-  BUILD_NO: "2"
+  BUILD_NO: "3"
   BUILD_TYPE: "release"
 
 jobs:
@@ -22,354 +22,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch 1 - nested vkMapMemory and build label
+      - name: Apply patches
         run: |
-          python3 - <<'PY'
-          import os, sys
-          L = lambda *a: "\n".join(a)
-          def fail(p):
-              sys.exit("PATCH FAILED: expected text not found in " + p)
-
-          p = "meson.build"
-          s = open(p).read()
-          old = "version : '0.5.0',"
-          if old not in s:
-              fail(p)
-          open(p, "w").write(s.replace(old, "version : 'ani-driver-build" + os.environ["BUILD_NO"] + "',", 1))
-          print("patched:", p)
-
-          p = "src/vk/mali_memory.h"
-          s = open(p).read()
-          old = L("   void *map;", "", "   /* The range [lo, hi) ever mapped")
-          new = L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (ani-driver). */", "   uint32_t map_count;", "", "   /* The range [lo, hi) ever mapped")
-          if old not in s:
-              fail(p)
-          open(p, "w").write(s.replace(old, new, 1))
-          print("patched:", p)
-
-          p = "src/vk/mali_device_memory.c"
-          s = open(p).read()
-          edits = [
-              (L("   if (mem->map)",
-                 '      return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "memory is already mapped");'),
-               "   /* ani-driver: a nested vkMapMemory is tolerated (see map_count). */"),
-              (L("      dmabuf_sync(mem, DMA_BUF_SYNC_START);",
-                 "      base = mem->dmabuf_map;"),
-               L("      if (!mem->map)",
-                 "         dmabuf_sync(mem, DMA_BUF_SYNC_START);",
-                 "      base = mem->dmabuf_map;")),
-              (L("   mem->map = base + offset;",
-                 "   if (mem->mapped_hi == mem->mapped_lo) {"),
-               L("   if (!mem->map)",
-                 "      mem->map = base + offset;",
-                 "   mem->map_count++;",
-                 "   if (mem->mapped_hi == mem->mapped_lo) {")),
-              (L("   *ppData = mem->map;",
-                 "   return VK_SUCCESS;"),
-               L("   *ppData = base + offset;",
-                 "   return VK_SUCCESS;")),
-              (L("   if (!mem || !mem->map)",
-                 "      return VK_SUCCESS;",
-                 "   /* No cache maintenance."),
-               L("   if (!mem || !mem->map)",
-                 "      return VK_SUCCESS;",
-                 "   if (mem->map_count > 1) {",
-                 "      mem->map_count--;",
-                 "      return VK_SUCCESS;",
-                 "   }",
-                 "   mem->map_count = 0;",
-                 "   /* No cache maintenance.")),
-          ]
-          for old, new in edits:
-              if old not in s:
-                  fail(p)
-              s = s.replace(old, new, 1)
-          open(p, "w").write(s)
-          print("patched:", p)
-          PY
-
-      - name: Patch 2 - diagnostics output
-        run: |
-          python3 - <<'PY'
-          import os, sys
-          build = os.environ["BUILD_NO"]
-          header = r'''/* ani-driver: diagnostics output. Header only.
-           * Every line goes to stderr (Vita3K+ keeps it in panvk_log.txt), to logcat
-           * under the tag "ani-driver" and, if /sdcard/Download/ani-driver.log
-           * already exists, to that file too. */
-          #ifndef MALI_PC_TRACE_H
-          #define MALI_PC_TRACE_H
-
-          #include <stdarg.h>
-          #include <stdio.h>
-          #include <unistd.h>
-          #ifdef __ANDROID__
-          #include <android/log.h>
-          #endif
-
-          static inline void
-          mali_pc_filelog(const char *line)
-          {
-             fprintf(stderr, "[ani-driver] %s\n", line);
-          #ifdef __ANDROID__
-             __android_log_write(ANDROID_LOG_INFO, "ani-driver", line);
-          #endif
-             static const char *const paths[] = {
-                "/sdcard/Download/ani-driver.log",
-                "/storage/emulated/0/Download/ani-driver.log",
-                "/data/local/tmp/ani-driver.log",
-             };
-             for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-                if (access(paths[i], W_OK) != 0)
-                   continue;
-                FILE *f = fopen(paths[i], "a");
-                if (!f)
-                   continue;
-                fprintf(f, "[pid %d] %s\n", (int)getpid(), line);
-                fclose(f);
-                return;
-             }
-          }
-
-          #endif
-          '''
-          header = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in header.split("\n"))
-          open("src/vk/mali_pc_trace.h", "w").write(header)
-
-          p = "src/vk/mali_waist.c"
-          s = open(p).read()
-          marker = '#include "util/u_atomic.h"\n'
-          if marker not in s:
-              sys.exit("PATCH FAILED: marker not found in " + p)
-          helper = r'''#include "mali_pc_trace.h"
-
-          static void __attribute__((format(printf, 1, 2)))
-          mali_pc_loge(const char *fmt, ...)
-          {
-             char buf[512];
-             va_list ap;
-             va_start(ap, fmt);
-             vsnprintf(buf, sizeof(buf), fmt, ap);
-             va_end(ap);
-             mesa_loge("%s", buf);
-             mali_pc_filelog(buf);
-          }
-
-          static void __attribute__((constructor))
-          mali_pc_loaded(void)
-          {
-             char cmd[256] = "?";
-             FILE *f = fopen("/proc/self/cmdline", "r");
-             if (f) {
-                size_t n = fread(cmd, 1, sizeof(cmd) - 1, f);
-                cmd[n] = 0;
-                fclose(f);
-             }
-             char line[400];
-             snprintf(line, sizeof(line), "ani-driver build BUILDNO loaded in %s", cmd);
-             mali_pc_filelog(line);
-          }
-          '''.replace("BUILDNO", build)
-          helper = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in helper.split("\n"))
-          head, tail = s.split(marker, 1)
-          if tail.count("mesa_loge(") != 4:
-              sys.exit("PATCH FAILED: expected 4 mesa_loge calls, found %d" % tail.count("mesa_loge("))
-          tail = tail.replace("mesa_loge(", "mali_pc_loge(")
-          open(p, "w").write(head + marker + helper + tail)
-          print("patched:", p)
-          PY
+          test -f ani_patches.py || { echo "ani_patches.py is missing from the repo"; exit 1; }
+          test -f ani_diag.py || { echo "ani_diag.py is missing from the repo"; exit 1; }
+          python3 ani_patches.py
+          python3 ani_diag.py
           git status --short
-
-      - name: Patch 3 - render target diagnostics
-        run: |
-          python3 - <<'PY'
-          import sys
-          p = "src/vk/mali_image.c"
-          s = open(p).read()
-
-          old = "static uint64_t\nchoose_modifier(const struct mali_image *image,"
-          new = "static uint64_t\nchoose_modifier_impl(const struct mali_image *image,"
-          anchor = "   return DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED;\n}\n"
-          if s.count(old) != 1 or s.count(anchor) != 1:
-              sys.exit("PATCH FAILED: choose_modifier anchors not found in " + p)
-          s = s.replace(old, new, 1)
-
-          diag = r"""
-          /* ani-driver diagnostics: for every colour or depth target, log
-           * whether it got AFBC compression and, if not, the first rule that said
-           * no. Read with: logcat -s MESA, or in a bug report (lines start with
-           * "ani-driver"). Nothing here changes which modifier is chosen. */
-          #include <pthread.h>
-
-          static const char *
-          pc_afbc_reason(const struct mali_image *image, const enum pipe_format *formats,
-                         unsigned arch, const VkImageCreateInfo *info)
-          {
-             const VkImageUsageFlags usage = image->vk.usage | image->vk.stencil_usage;
-             if (arch != 7)
-                return "not-v7";
-             if (!(usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
-                return vk_format_is_depth_or_stencil(image->vk.format) ? "v7-depth-never" : "no-colour-usage";
-             if (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
-                return "usage-depth-stencil";
-             if (usage & VK_IMAGE_USAGE_STORAGE_BIT)
-                return "usage-storage";
-             if (usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT)
-                return "usage-host-transfer";
-             if (image->plane_count != 1)
-                return "multi-plane";
-             if (vk_format_is_depth_or_stencil(image->vk.format))
-                return "depth-format";
-             if (!v7_afbc_format(formats[0]))
-                return "format-not-8bit-rgba";
-             if (image->vk.create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
-                return "flag-mutable-format";
-             if (image->vk.create_flags & VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT)
-                return "flag-block-texel-view";
-             if (image->vk.create_flags & VK_IMAGE_CREATE_ALIAS_BIT)
-                return "flag-alias";
-             if (image->vk.create_flags & VK_IMAGE_CREATE_DISJOINT_BIT)
-                return "flag-disjoint";
-             if (image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
-                                           VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
-                                           VK_IMAGE_CREATE_SPARSE_ALIASED_BIT))
-                return "flag-sparse";
-             if (image->vk.tiling != VK_IMAGE_TILING_OPTIMAL)
-                return "tiling-not-optimal";
-             if (image->vk.image_type != VK_IMAGE_TYPE_2D)
-                return "not-2d";
-             if (image->vk.samples != 1)
-                return "multisampled";
-             if (image->vk.mip_levels != 1)
-                return "mip-levels";
-             if (image->vk.array_layers != 1)
-                return "array-layers";
-             if (external_memory(info))
-                return "external-or-swapchain";
-             const unsigned min = mali_afbc_min_extent(formats[0]);
-             if (image->vk.extent.width < min || image->vk.extent.height < min)
-                return "too-small";
-             return "other";
-          }
-
-          struct pc_img_key {
-             int fmt;
-             uint32_t usage, flags, samples;
-             uint64_t mod;
-             char why[32];
-             uint32_t count;
-          };
-
-          static struct pc_img_key pc_keys[128];
-          static unsigned pc_nkeys;
-          static unsigned pc_total;
-          static uint64_t pc_px[3]; /* colour compressed, colour plain, depth/stencil */
-          static pthread_mutex_t pc_lock = PTHREAD_MUTEX_INITIALIZER;
-
-          static void
-          pc_log_image(const struct mali_image *image, const enum pipe_format *formats,
-                       unsigned arch, const VkImageCreateInfo *info, uint64_t mod)
-          {
-             const VkImageUsageFlags usage = image->vk.usage | image->vk.stencil_usage;
-             if (!(usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))
-                return;
-             const bool comp = mod == MALI_MOD_AFBC || mod == MALI_MOD_AFBC_YTR;
-             const bool ds = vk_format_is_depth_or_stencil(image->vk.format);
-             const char *why = comp ? "compressed" : pc_afbc_reason(image, formats, arch, info);
-             const uint64_t px = (uint64_t)image->vk.extent.width * image->vk.extent.height *
-                                 image->vk.array_layers * image->vk.samples;
-             char buf[400];
-             bool print = false;
-             pthread_mutex_lock(&pc_lock);
-             pc_px[ds ? 2 : (comp ? 0 : 1)] += px;
-             pc_total++;
-             unsigned k;
-             for (k = 0; k < pc_nkeys; k++) {
-                const struct pc_img_key *e = &pc_keys[k];
-                if (e->fmt == (int)image->vk.format && e->usage == (uint32_t)usage &&
-                    e->flags == (uint32_t)image->vk.create_flags &&
-                    e->samples == (uint32_t)image->vk.samples && e->mod == mod &&
-                    strcmp(e->why, why) == 0)
-                   break;
-             }
-             if (k == pc_nkeys && pc_nkeys < 128) {
-                struct pc_img_key *e = &pc_keys[pc_nkeys++];
-                e->fmt = (int)image->vk.format;
-                e->usage = (uint32_t)usage;
-                e->flags = (uint32_t)image->vk.create_flags;
-                e->samples = (uint32_t)image->vk.samples;
-                e->mod = mod;
-                snprintf(e->why, sizeof(e->why), "%s", why);
-                e->count = 0;
-             }
-             if (k < pc_nkeys) {
-                pc_keys[k].count++;
-                if (pc_keys[k].count == 1 || pc_keys[k].count == 100 || pc_keys[k].count == 1000)
-                   print = true;
-             }
-             if (print) {
-                snprintf(buf, sizeof(buf),
-                         "ani-driver target: vkfmt=%d pipe=%s %ux%u layers=%u samples=%u usage=0x%x "
-                         "flags=0x%x tiling=%d -> %s (%s) [seen %u]",
-                         (int)image->vk.format, util_format_short_name(formats[0]),
-                         image->vk.extent.width, image->vk.extent.height, image->vk.array_layers,
-                         (unsigned)image->vk.samples, (unsigned)usage,
-                         (unsigned)image->vk.create_flags, (int)image->vk.tiling,
-                         comp ? "AFBC" : "plain", why, k < pc_nkeys ? pc_keys[k].count : 1u);
-                mesa_logi("%s", buf);
-                mali_pc_filelog(buf);
-             }
-             if (pc_total % 50 == 0) {
-                snprintf(buf, sizeof(buf),
-                         "ani-driver summary after %u targets: colour AFBC %llu kpx, colour plain %llu kpx, "
-                         "depth/stencil %llu kpx",
-                         pc_total, (unsigned long long)(pc_px[0] / 1000),
-                         (unsigned long long)(pc_px[1] / 1000), (unsigned long long)(pc_px[2] / 1000));
-                mesa_logi("%s", buf);
-                mali_pc_filelog(buf);
-             }
-             pthread_mutex_unlock(&pc_lock);
-          }
-
-          static uint64_t
-          choose_modifier(const struct mali_image *image, const enum pipe_format *formats,
-                          unsigned arch, const VkImageCreateInfo *info)
-          {
-             const uint64_t mod = choose_modifier_impl(image, formats, arch, info);
-             pc_log_image(image, formats, arch, info, mod);
-             return mod;
-          }
-          """
-          s = s.replace(anchor, anchor + diag, 1)
-
-          k = s.find('#include "')
-          s = s[:k] + '#include "mali_pc_trace.h"\n' + s[k:]
-          open(p, "w").write(s)
-          print("patched:", p)
-          PY
-
-      - name: Patch 4 - extensions
-        run: |
-          python3 - <<'PY'
-          import sys
-          p = "src/vk/mali_physical_device.c"
-          s = open(p).read()
-          edits = [
-              ("static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n",
-               "static const struct vk_device_extension_table mali_device_extensions = {\n   .KHR_driver_properties = true,\n   /* ani-driver: sampler.c already handles mirror-clamp; the compiler keeps\n    * denormals by default (see ftz_mode in mali_shader.c). Vita3K turns its\n    * half-float denormal emulation off when float controls are present. */\n   .KHR_sampler_mirror_clamp_to_edge = true,\n   .KHR_shader_float_controls = true,\n   /* mali_pipeline.c already returns VK_PIPELINE_COMPILE_REQUIRED for the\n    * fail-on-compile flag; Vita3K's async compile path relies on it. */\n   .EXT_pipeline_creation_cache_control = true,\n"),
-              ("   *f = (struct vk_features) {\n",
-               "   *f = (struct vk_features) {\n      .pipelineCreationCacheControl = true,\n"),
-              ("   *props = (struct vk_properties) {\n",
-               "   *props = (struct vk_properties) {\n      .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,\n      .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,\n      .shaderDenormPreserveFloat16 = true,\n      .shaderDenormPreserveFloat32 = true,\n"),
-          ]
-          for old, new in edits:
-              if s.count(old) != 1:
-                  sys.exit("PATCH FAILED: anchor found %d times in %s:\n%s" % (s.count(old), p, old))
-              s = s.replace(old, new, 1)
-          open(p, "w").write(s)
-          print("patched:", p)
-          PY
 
       - name: Fetch pinned Mesa
         run: |
@@ -379,17 +38,13 @@ jobs:
           git -C mesa fetch --depth 1 https://github.com/bmdhacks/armsx2-turnip.git "$MESA_COMMIT"
           git -C mesa checkout FETCH_HEAD
 
-      - name: Host packages
+      - name: Host packages and Rust
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build libclang-dev clang python3-pip zip
           pip install --break-system-packages "meson>=1.7" mako pyyaml
-
-      - name: Rust toolchain
-        run: |
           rustup update stable
           rustup target add aarch64-linux-android
-          rustc --version
 
       - name: Cache bindgen
         id: bindgen-cache
@@ -407,16 +62,11 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
           ls "$ANDROID_HOME/ndk/$NDK_VERSION"
 
-      - name: Configure
+      - name: Configure and build
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
-          grep '^ndk' cross-ci.ini
           meson setup build-android --cross-file cross-ci.ini --buildtype="$BUILD_TYPE"
-
-      - name: Build
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
           ninja -C build-android
 
       - name: Verify the built library
@@ -424,24 +74,19 @@ jobs:
           SO=build-android/src/libvulkan_malisx2.so
           test -f "$SO" || { echo "FAIL: $SO not found"; exit 1; }
           TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          RE="$TC/llvm-readelf"
-          NM="$TC/llvm-nm"
           FAIL=0
-          "$RE" -h "$SO" | grep -q "AArch64" || { echo "FAIL: not an AArch64 library"; FAIL=1; }
-          NEEDED=$("$RE" -d "$SO" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | tr '\n' ' ')
-          echo "needed libraries: $NEEDED"
-          for lib in $NEEDED; do
+          "$TC/llvm-readelf" -h "$SO" | grep -q "AArch64" || { echo "FAIL: not AArch64"; FAIL=1; }
+          for lib in $("$TC/llvm-readelf" -d "$SO" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'); do
             case "$lib" in
               liblog.so|libm.so|libdl.so|libc.so) ;;
               *) echo "FAIL: unexpected dependency $lib"; FAIL=1 ;;
             esac
           done
-          EXPORTS=$("$NM" -D --defined-only "$SO" | awk '{print $3}' | sort | tr '\n' ' ')
-          echo "exports: $EXPORTS"
+          EXPORTS=$("$TC/llvm-nm" -D --defined-only "$SO" | awk '{print $3}')
           for sym in HMI vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion; do
             echo "$EXPORTS" | grep -qw "$sym" || { echo "FAIL: missing export $sym"; FAIL=1; }
           done
-          strings -n 6 "$SO" | grep -q "ani-driver-build$BUILD_NO" || { echo "FAIL: build label ani-driver-build$BUILD_NO not found in the library"; FAIL=1; }
+          strings -n 6 "$SO" | grep -q "ani-driver-build$BUILD_NO" || { echo "FAIL: build label missing"; FAIL=1; }
           [ "$FAIL" = 0 ] && echo "VERIFY OK" || exit 1
 
       - name: Package flat driver zip
@@ -449,33 +94,32 @@ jobs:
           TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
           mkdir -p out
           "$TC/llvm-strip" -o out/libvulkan_malisx2.so build-android/src/libvulkan_malisx2.so
-          python3 - <<'PY'
+          python3 -c "
           import json, os
-          b = os.environ["BUILD_NO"]
-          slug = os.environ.get("ZIP_SLUG", "ani-driver")
-          
-          meta = {
-              "schema_version": 1,
-              "name": os.environ.get("DRIVER_NAME", "ani-driver"),
-              "version": f"ani-driver-build{b}",
-              "library_name": "libvulkan_malisx2.so"
-          }
-          
-          with open("out/meta.json", "w") as f:
-              json.dump(meta, f, indent=2)
-          print("Generated out/meta.json successfully.")
-          PY
-          
-          cd out
-          ZIP_NAME="${ZIP_SLUG}-build${BUILD_NO}.zip"
-          zip -j "$ZIP_NAME" libvulkan_malisx2.so meta.json
-          echo "Created archive: $ZIP_NAME"
-          ls -la
+          b, n = os.environ['BUILD_NO'], os.environ['DRIVER_NAME']
+          meta = {'schemaVersion': 1, 'name': n + ' build ' + b,
+                  'description': n + ' build ' + b + ': malisx2-based Vulkan driver for Mali G52 (kbase), for emulators',
+                  'author': n + ' (fork of malisx2 by bmdhacks)', 'packageVersion': b, 'vendor': n,
+                  'driverVersion': '44.1.0', 'minApi': 29, 'libraryName': 'libvulkan_malisx2.so'}
+          json.dump(meta, open('out/meta.json', 'w'), indent=2)
+          "
+          ZIP="$ZIP_SLUG-build-$BUILD_NO.zip"
+          (cd out && zip -9 "../$ZIP" libvulkan_malisx2.so meta.json)
+          sha256sum "$ZIP" | tee SHA256SUMS.txt
+          {
+            echo "## $DRIVER_NAME build $BUILD_NO ($BUILD_TYPE)"
+            echo "- zip: \`$ZIP\` ($(du -h "$ZIP" | cut -f1))"
+            echo "- sha256: \`$(sha256sum "$ZIP" | cut -d' ' -f1)\`"
+            echo "- library check passed"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload driver artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ZIP_SLUG }}-build${{ env.BUILD_NO }}
-          path: out/*.zip
-          
-          
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$ZIP_SLUG-build-$BUILD_NO-run${{ github.run_number }}" \
+            "$ZIP_SLUG-build-$BUILD_NO.zip" SHA256SUMS.txt \
+            --prerelease --title "$DRIVER_NAME build $BUILD_NO" \
+            --notes "ani-driver build $BUILD_NO ($BUILD_TYPE build). Commit $GITHUB_SHA."
+
+# end of file
