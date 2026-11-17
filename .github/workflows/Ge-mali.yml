@@ -6,12 +6,15 @@ on:
 permissions:
   contents: write
 
+# The settings you change live here. The mechanics live in ani_ci.py (never changes) and
+# the feature code in ani_features.py. Remove a name from FEATURES to leave it out.
 env:
-  NDK_VERSION: 28.2.13676358
   DRIVER_NAME: "ani-driver"
   ZIP_SLUG: "ani-driver"
-  BUILD_NO: "3"
+  BUILD_NO: "auto"
   BUILD_TYPE: "release"
+  NDK_VERSION: 28.2.13676358
+  FEATURES: "map_fix,log_output,diag,float_controls,mirror_clamp,pipeline_cache_control"
 
 jobs:
   android:
@@ -22,104 +25,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply patches
-        run: |
-          test -f ani_patches.py || { echo "ani_patches.py is missing from the repo"; exit 1; }
-          test -f ani_diag.py || { echo "ani_diag.py is missing from the repo"; exit 1; }
-          python3 ani_patches.py
-          python3 ani_diag.py
-          git status --short
-
-      - name: Fetch pinned Mesa
-        run: |
-          MESA_COMMIT=$(sed -n "s/^mesa_commit = '\(.*\)'/\1/p" meson.build)
-          echo "Mesa commit: $MESA_COMMIT"
-          git init mesa
-          git -C mesa fetch --depth 1 https://github.com/bmdhacks/armsx2-turnip.git "$MESA_COMMIT"
-          git -C mesa checkout FETCH_HEAD
-
-      - name: Host packages and Rust
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build libclang-dev clang python3-pip zip
-          pip install --break-system-packages "meson>=1.7" mako pyyaml
-          rustup update stable
-          rustup target add aarch64-linux-android
-
       - name: Cache bindgen
-        id: bindgen-cache
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/bindgen
           key: bindgen-0.71.1-${{ runner.os }}
 
-      - name: Install bindgen 0.71.1
-        if: steps.bindgen-cache.outputs.cache-hit != 'true'
-        run: cargo install bindgen-cli --version 0.71.1 --locked
-
-      - name: Android NDK r28c
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
-          ls "$ANDROID_HOME/ndk/$NDK_VERSION"
-
-      - name: Configure and build
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          sed "s#^ndk = .*#ndk = '$ANDROID_HOME/ndk/$NDK_VERSION'#" cross/android-aarch64.ini > cross-ci.ini
-          meson setup build-android --cross-file cross-ci.ini --buildtype="$BUILD_TYPE"
-          ninja -C build-android
-
-      - name: Verify the built library
-        run: |
-          SO=build-android/src/libvulkan_malisx2.so
-          test -f "$SO" || { echo "FAIL: $SO not found"; exit 1; }
-          TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          FAIL=0
-          "$TC/llvm-readelf" -h "$SO" | grep -q "AArch64" || { echo "FAIL: not AArch64"; FAIL=1; }
-          for lib in $("$TC/llvm-readelf" -d "$SO" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'); do
-            case "$lib" in
-              liblog.so|libm.so|libdl.so|libc.so) ;;
-              *) echo "FAIL: unexpected dependency $lib"; FAIL=1 ;;
-            esac
-          done
-          EXPORTS=$("$TC/llvm-nm" -D --defined-only "$SO" | awk '{print $3}')
-          for sym in HMI vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion; do
-            echo "$EXPORTS" | grep -qw "$sym" || { echo "FAIL: missing export $sym"; FAIL=1; }
-          done
-          strings -n 6 "$SO" | grep -q "ani-driver-build$BUILD_NO" || { echo "FAIL: build label missing"; FAIL=1; }
-          [ "$FAIL" = 0 ] && echo "VERIFY OK" || exit 1
-
-      - name: Package flat driver zip
-        run: |
-          TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          mkdir -p out
-          "$TC/llvm-strip" -o out/libvulkan_malisx2.so build-android/src/libvulkan_malisx2.so
-          python3 -c "
-          import json, os
-          b, n = os.environ['BUILD_NO'], os.environ['DRIVER_NAME']
-          meta = {'schemaVersion': 1, 'name': n + ' build ' + b,
-                  'description': n + ' build ' + b + ': malisx2-based Vulkan driver for Mali G52 (kbase), for emulators',
-                  'author': n + ' (fork of malisx2 by bmdhacks)', 'packageVersion': b, 'vendor': n,
-                  'driverVersion': '44.1.0', 'minApi': 29, 'libraryName': 'libvulkan_malisx2.so'}
-          json.dump(meta, open('out/meta.json', 'w'), indent=2)
-          "
-          ZIP="$ZIP_SLUG-build-$BUILD_NO.zip"
-          (cd out && zip -9 "../$ZIP" libvulkan_malisx2.so meta.json)
-          sha256sum "$ZIP" | tee SHA256SUMS.txt
-          {
-            echo "## $DRIVER_NAME build $BUILD_NO ($BUILD_TYPE)"
-            echo "- zip: \`$ZIP\` ($(du -h "$ZIP" | cut -f1))"
-            echo "- sha256: \`$(sha256sum "$ZIP" | cut -d' ' -f1)\`"
-            echo "- library check passed"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish release
+      - name: Build, verify and publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$ZIP_SLUG-build-$BUILD_NO-run${{ github.run_number }}" \
-            "$ZIP_SLUG-build-$BUILD_NO.zip" SHA256SUMS.txt \
-            --prerelease --title "$DRIVER_NAME build $BUILD_NO" \
-            --notes "ani-driver build $BUILD_NO ($BUILD_TYPE build). Commit $GITHUB_SHA."
+        run: python3 ani_ci.py
 
 # end of file
