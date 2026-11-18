@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 ani_ci.py - Minimal Android Vulkan Driver Build Orchestrator
-Handles NDK setup, Mesa compilation, patching, and delegates packaging/publishing to ani_release.
-Fixed cross-file compiler definition (removed ccache dependency to prevent setup failure).
+Handles NDK setup, Meson upgrade, Mesa compilation, patching, and delegates packaging/publishing to ani_release.
 """
 import os
 import pathlib
@@ -32,8 +31,6 @@ def run_cmd(cmd, cwd=None, env=None):
             print("\n--- MESON LOG ERROR DUMP ---")
             print(log_path.read_text(encoding="utf-8", errors="ignore")[-6000:])
             print("--- END MESON LOG ---")
-        else:
-            log("Meson log file not found at expected path.", "WARN")
         raise
 
 
@@ -66,7 +63,6 @@ def create_android_cross_file(ndk_dir: pathlib.Path, api_level: int = 29) -> pat
     toolchain_bin = ndk_dir / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin"
     cross_file = pathlib.Path.cwd() / "android-aarch64-cross.ini"
 
-    # Direct compiler paths without ccache wrapper
     content = f"""[binaries]
 ar = '{toolchain_bin}/llvm-ar'
 c = '{toolchain_bin}/aarch64-linux-android{api_level}-clang'
@@ -90,6 +86,10 @@ endian = 'little'
 def main():
     log("=== STARTING ANI-DRIVER BUILD PIPELINE ===")
     check_memory()
+
+    # Ensure Meson meets Mesa 26.3.0 requirement (>= 1.5.0)
+    log("Upgrading Meson to satisfy Mesa requirements...", "INFO")
+    run_cmd(["pip", "install", "--upgrade", "meson"])
 
     build_type = os.environ.get("BUILD_TYPE", "release")
     ndk_version = os.environ.get("NDK_VERSION", "28.2.13676358")
