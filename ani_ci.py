@@ -2,7 +2,7 @@
 """
 ani_ci.py - Minimal Android Vulkan Driver Build Orchestrator
 Handles NDK setup, Mesa compilation, patching, and delegates packaging/publishing to ani_release.
-Includes automatic Meson error log dumping on failure.
+Fixed cross-file compiler definition (removed ccache dependency to prevent setup failure).
 """
 import os
 import pathlib
@@ -29,9 +29,11 @@ def run_cmd(cmd, cwd=None, env=None):
         build_dir = pathlib.Path.cwd() / "mesa" / "build-android-aarch64"
         log_path = build_dir / "meson-logs" / "meson-log.txt"
         if log_path.exists():
-            print("\n--- MESON LOG ERROR DUMP (Last 4000 chars) ---")
-            print(log_path.read_text(encoding="utf-8", errors="ignore")[-4000:])
+            print("\n--- MESON LOG ERROR DUMP ---")
+            print(log_path.read_text(encoding="utf-8", errors="ignore")[-6000:])
             print("--- END MESON LOG ---")
+        else:
+            log("Meson log file not found at expected path.", "WARN")
         raise
 
 
@@ -64,10 +66,11 @@ def create_android_cross_file(ndk_dir: pathlib.Path, api_level: int = 29) -> pat
     toolchain_bin = ndk_dir / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin"
     cross_file = pathlib.Path.cwd() / "android-aarch64-cross.ini"
 
+    # Direct compiler paths without ccache wrapper
     content = f"""[binaries]
 ar = '{toolchain_bin}/llvm-ar'
-c = ['ccache', '{toolchain_bin}/aarch64-linux-android{api_level}-clang']
-cpp = ['ccache', '{toolchain_bin}/aarch64-linux-android{api_level}-clang++']
+c = '{toolchain_bin}/aarch64-linux-android{api_level}-clang'
+cpp = '{toolchain_bin}/aarch64-linux-android{api_level}-clang++'
 c_ld = 'lld'
 cpp_ld = 'lld'
 strip = '{toolchain_bin}/llvm-strip'
