@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ani_ci.py - Final Unified Build & Release Orchestrator for ani-driver
-Pulls the armsx2-turnip fork (malisx2 branch), applies features, builds, verifies, and packages.
+Pulls the armsx2-turnip fork (malisx2 branch), applies features, builds, verifies, packages, and publishes.
 """
 import hashlib, json, os, re, shutil, subprocess, sys, zipfile
 
@@ -182,6 +182,6 @@ def main():
             print("::endgroup::", flush=True)
 
 
-if __name__ == "__main__":
+if __name__ == "main":
     main()
-        
+    
