@@ -6,15 +6,13 @@ on:
 permissions:
   contents: write
 
-# The settings you change live here. The mechanics live in ani_ci.py (never changes) and
-# the feature code in ani_features.py. Remove a name from FEATURES to leave it out.
 env:
   DRIVER_NAME: "ani-driver"
   ZIP_SLUG: "ani-driver"
   BUILD_NO: "auto"
   BUILD_TYPE: "release"
   NDK_VERSION: 28.2.13676358
-  FEATURES: "map_fix,log_output,diag,float_controls,mirror_clamp,pipeline_cache_control"
+  FEATURES: "map_fix,log_output,diag,float_controls,mirror_clamp,pipeline_cache_control,geometry"
 
 jobs:
   android:
@@ -31,9 +29,13 @@ jobs:
           path: ~/.cargo/bin/bindgen
           key: bindgen-0.71.1-${{ runner.os }}
 
+      - name: Install Host Prerequisite Tools for Libpoly Geometry
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build glslang-tools spirv-tools libclc-dev llvm-dev
+
       - name: Build, verify and publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 ani_ci.py
-
-# end of file
+        
