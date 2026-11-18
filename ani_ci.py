@@ -2,6 +2,7 @@
 """
 ani_ci.py - Minimal Android Vulkan Driver Build Orchestrator
 Handles NDK setup, Mesa compilation, patching, and delegates packaging/publishing to ani_release.
+Includes automatic Meson error log dumping on failure.
 """
 import os
 import pathlib
@@ -21,7 +22,17 @@ MESA_REF = os.environ.get("MESA_REF", "mesa-26.3.0")
 
 def run_cmd(cmd, cwd=None, env=None):
     log(f"EXEC: {' '.join(str(c) for c in cmd)}")
-    subprocess.run(cmd, cwd=cwd, env=env, check=True)
+    try:
+        subprocess.run(cmd, cwd=cwd, env=env, check=True)
+    except subprocess.CalledProcessError as e:
+        log(f"Command failed with exit code {e.returncode}", "ERROR")
+        build_dir = pathlib.Path.cwd() / "mesa" / "build-android-aarch64"
+        log_path = build_dir / "meson-logs" / "meson-log.txt"
+        if log_path.exists():
+            print("\n--- MESON LOG ERROR DUMP (Last 4000 chars) ---")
+            print(log_path.read_text(encoding="utf-8", errors="ignore")[-4000:])
+            print("--- END MESON LOG ---")
+        raise
 
 
 def setup_ndk(ndk_version: str) -> pathlib.Path:
@@ -142,4 +153,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+    
