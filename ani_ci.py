@@ -63,17 +63,23 @@ def create_android_cross_file(ndk_dir: pathlib.Path, api_level: int = 29) -> pat
     toolchain_bin = ndk_dir / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin"
     cross_file = pathlib.Path.cwd() / "android-aarch64-cross.ini"
 
-    clang_path = str(toolchain_bin / f"aarch64-linux-android{api_level}-clang")
-    clangpp_path = str(toolchain_bin / f"aarch64-linux-android{api_level}-clang++")
-
     content = f"""[binaries]
 ar = '{toolchain_bin}/llvm-ar'
-c = ['{clang_path}', '--target=aarch64-linux-android{api_level}']
-cpp = ['{clangpp_path}', '--target=aarch64-linux-android{api_level}']
+c = '{toolchain_bin}/aarch64-linux-android{api_level}-clang'
+cpp = '{toolchain_bin}/aarch64-linux-android{api_level}-clang++'
 c_ld = 'lld'
 cpp_ld = 'lld'
 strip = '{toolchain_bin}/llvm-strip'
 pkg-config = '/usr/bin/pkg-config'
+
+[built-in options]
+c_args = ['--target=aarch64-linux-android{api_level}']
+cpp_args = ['--target=aarch64-linux-android{api_level}']
+c_link_args = ['--target=aarch64-linux-android{api_level}']
+cpp_link_args = ['--target=aarch64-linux-android{api_level}']
+
+[properties]
+needs_exe_wrapper = true
 
 [host_machine]
 system = 'android'
@@ -159,4 +165,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
