@@ -15,8 +15,8 @@ import ani_features
 import ani_release
 from ani_diag import log, check_memory
 
-MESA_REPO_URL = os.environ.get("MESA_REPO_URL", "https://gitlab.freedesktop.org/mesa/mesa.git")
-MESA_REF = os.environ.get("MESA_REF", "mesa-25.2.8")
+MESA_REPO_URL = os.environ.get("MESA_REPO_URL", "https://github.com/bmdhacks/armsx2-turnip.git")
+MESA_REF = os.environ.get("MESA_REF", "malisx2")
 
 
 def run_cmd(cmd, cwd=None, env=None):
@@ -73,102 +73,4 @@ strip = '{toolchain_bin}/llvm-strip'
 pkg-config = '/usr/bin/pkg-config'
 
 [built-in options]
-c_args = ['--target=aarch64-linux-android{api_level}']
-cpp_args = ['--target=aarch64-linux-android{api_level}']
-c_link_args = ['--target=aarch64-linux-android{api_level}']
-cpp_link_args = ['--target=aarch64-linux-android{api_level}']
-
-[properties]
-needs_exe_wrapper = true
-sizeof_void* = 8
-sizeof_long = 8
-sizeof_size_t = 8
-alignment_char = 1
-alignment_void* = 8
-alignment_double = 8
-
-[host_machine]
-system = 'android'
-cpu_family = 'aarch64'
-cpu = 'armv8'
-endian = 'little'
-"""
-    cross_file.write_text(content, encoding="utf-8")
-    log(f"Wrote Meson Android cross-file to {cross_file}", "OK")
-    return cross_file
-
-
-def main():
-    log("=== STARTING ANI-DRIVER BUILD PIPELINE ===")
-    check_memory()
-
-    # Ensure stable Meson version without bleeding-edge strictness
-    log("Installing stable Meson version...", "INFO")
-    run_cmd(["pip", "install", "--upgrade", "meson==1.4.0"])
-
-    build_type = os.environ.get("BUILD_TYPE", "release")
-    ndk_version = os.environ.get("NDK_VERSION", "28.2.13676358")
-    features_raw = os.environ.get("FEATURES", "")
-    features = [f.strip() for f in features_raw.split(",") if f.strip()]
-
-    # 1. Configure features & clone/patch Mesa
-    ani_features.configure_features()
-
-    mesa_dir = pathlib.Path.cwd() / "mesa"
-    if not mesa_dir.exists():
-        log(f"Cloning Mesa ({MESA_REF})...", "INFO")
-        run_cmd(["git", "clone", "--depth", "1", "--branch", MESA_REF, MESA_REPO_URL, str(mesa_dir)])
-
-    os.environ["MESA_SRC_DIR"] = str(mesa_dir)
-    ani_patches.apply_patches()
-
-    # 2. Setup NDK & Cross-compilation
-    ndk_dir = setup_ndk(ndk_version)
-    cross_file = create_android_cross_file(ndk_dir)
-
-    build_dir = mesa_dir / "build-android-aarch64"
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
-
-    meson_cmd = [
-        "meson",
-        "setup",
-        str(build_dir),
-        str(mesa_dir),
-        f"--cross-file={cross_file}",
-        f"--buildtype={build_type}",
-        "-Dplatforms=android",
-        "-Dplatform-sdk-version=29",
-        "-Dandroid-stub=true",
-        "-Dgallium-drivers=",
-        "-Dvulkan-drivers=panfrost",
-        "-Dallow-fallback-for=libdrm",
-        "-Degl=disabled",
-        "-Dgles1=disabled",
-        "-Dgles2=disabled",
-        "-Dglx=disabled",
-        "-Dllvm=disabled",
-        "-Dshared-llvm=disabled",
-        "-Dshader-cache=enabled",
-        "-Dzstd=disabled",
-    ]
-
-    run_cmd(meson_cmd)
-    run_cmd(["ninja", "-C", str(build_dir)])
-
-    # 3. Locate compiled PanVK Vulkan HAL shared object
-    so_candidates = list(build_dir.rglob("libvulkan_panfrost.so"))
-    if not so_candidates:
-        so_candidates = list(build_dir.rglob("libvulkan_*.so"))
-    if not so_candidates:
-        raise FileNotFoundError("Compiled Vulkan .so library not found in build output!")
-
-    compiled_so = so_candidates[0]
-    log(f"Found compiled driver binary: {compiled_so}", "OK")
-
-    # 4. Delegate to static release layer with features preserved
-    ani_release.package_and_publish(compiled_so, MESA_REF, features)
-
-
-if __name__ == "__main__":
-    main()
+    
