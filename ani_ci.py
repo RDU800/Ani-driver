@@ -80,6 +80,12 @@ cpp_link_args = ['--target=aarch64-linux-android{api_level}']
 
 [properties]
 needs_exe_wrapper = true
+sizeof_void* = 8
+sizeof_long = 8
+sizeof_size_t = 8
+alignment_char = 1
+alignment_void* = 8
+alignment_double = 8
 
 [host_machine]
 system = 'android'
@@ -136,6 +142,7 @@ def main():
         "-Dandroid-stub=true",
         "-Dgallium-drivers=",
         "-Dvulkan-drivers=panfrost",
+        "-Dallow-fallback-for=libdrm",
         "-Degl=disabled",
         "-Dgles1=disabled",
         "-Dgles2=disabled",
@@ -159,10 +166,10 @@ def main():
     compiled_so = so_candidates[0]
     log(f"Found compiled driver binary: {compiled_so}", "OK")
 
-    # 4. Delegate to static release layer
+    # 4. Delegate to static release layer with features preserved
     ani_release.package_and_publish(compiled_so, MESA_REF, features)
 
 
 if __name__ == "__main__":
     main()
-        
+    
