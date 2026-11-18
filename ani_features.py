@@ -1,29 +1,49 @@
 """Feature patches for ani-driver (malisx2). Called by ani_ci.py.
 Each feature is a function. To add one: write a function, add it to FEATURES, then put
-its name in the FEATURES list of the workflow. Every edit is an exact-text match; if the
-upstream text changes, the build stops with a clear message."""
-import os, subprocess, sys
+its name in the FEATURES list of the workflow. Every edit is an exact-text match. If the
+upstream text changed, that one feature is rolled back and reported as skipped (set the
+environment variable STRICT_FEATURES=1 to make a skipped feature fail the build instead).
+The result is written to ani_features_report.txt and shown in the release notes."""
+import os, re, subprocess, sys
 
 BUILD = os.environ.get("BUILD_NO", "0")
 L = lambda *a: "\n".join(a)
 _done = set()
 
 
+class PatchMismatch(Exception):
+    pass
+
+
+_journal = None  # path -> original text, for rollback of the feature being applied
+
+
 def fail(path, what):
-    sys.exit("PATCH FAILED in %s: %s" % (path, what))
+    raise PatchMismatch("%s: %s" % (path, what))
+
+
+def remember(path):
+    if _journal is not None and path not in _journal:
+        _journal[path] = open(path).read()
 
 
 def edit(path, pairs):
     s = open(path).read()
     for old, new in pairs:
         if s.count(old) != 1:
-            fail(path, "expected exactly one match of:\n" + old)
+            fail(path, "expected exactly one match of: " + old.strip().split("\n")[0])
         s = s.replace(old, new, 1)
+    remember(path)
     open(path, "w").write(s)
     print("patched:", path)
 
 
 def insert_after(path, anchor, text):
+    """Insert text right after anchor, unless upstream already has that entry."""
+    key = text.strip().split("\n")[0].split("=")[0].strip()
+    if key in open(path).read():
+        print("already present upstream, not added:", key)
+        return
     edit(path, [(anchor, anchor + text)])
 
 
@@ -35,11 +55,21 @@ PROP = (PD, "   *props = (struct vk_properties) {\n")
 
 
 def core():
-    edit("meson.build", [("version : '0.5.0',", "version : 'ani-driver-build%s'," % BUILD)])
+    """Build label (shown in driverInfo and checked after the build). Must succeed."""
+    text = open("meson.build").read()
+    new, n = re.subn(r"(?m)^(\s*)version : '[^']*',", r"\1version : 'ani-driver-build%s'," % BUILD,
+                     text, count=1)
+    if n != 1:
+        sys.exit("PATCH FAILED in meson.build: could not find the project version line")
+    open("meson.build", "w").write(new)
+    print("patched: meson.build (label ani-driver-build%s)" % BUILD)
 
 
 def map_fix():
     """A second vkMapMemory on already mapped memory returns the same view."""
+    if "map_count" in open("src/vk/mali_memory.h").read():
+        print("already present upstream, not added: map_count")
+        return
     edit("src/vk/mali_memory.h", [(
         L("   void *map;", "", "   /* The range [lo, hi) ever mapped"),
         L("   void *map;", "   /* vkMapMemory calls not yet matched by vkUnmapMemory (ani-driver). */",
@@ -137,7 +167,6 @@ mali_pc_loaded(void)
 
 def log_output():
     """Diagnostics go to stderr, logcat and an optional file."""
-    open("src/vk/mali_pc_trace.h", "w").write(HEADER)
     path = "src/vk/mali_waist.c"
     s = open(path).read()
     marker = '#include "util/u_atomic.h"\n'
@@ -146,6 +175,8 @@ def log_output():
     head, tail = s.split(marker, 1)
     if tail.count("mesa_loge(") != 4:
         fail(path, "expected 4 mesa_loge calls, found %d" % tail.count("mesa_loge("))
+    remember(path)
+    open("src/vk/mali_pc_trace.h", "w").write(HEADER)
     open(path, "w").write(head + marker + WAIST.replace("BUILDNO", BUILD) +
                           tail.replace("mesa_loge(", "mali_pc_loge("))
     print("patched:", path)
@@ -153,7 +184,9 @@ def log_output():
 
 def diag():
     """Log which render targets get compression (needs log_output)."""
-    subprocess.check_call([sys.executable, "ani_diag.py"])
+    remember("src/vk/mali_image.c")
+    if subprocess.call([sys.executable, "ani_diag.py"]) != 0:
+        fail("src/vk/mali_image.c", "ani_diag.py did not match this upstream version")
 
 
 def float_controls():
@@ -180,21 +213,46 @@ def pipeline_cache_control():
 FEATURES = {f.__name__: f for f in
             (map_fix, log_output, diag, float_controls, mirror_clamp, pipeline_cache_control)}
 DEPENDS = {"diag": ["log_output"]}
+APPLIED, SKIPPED = [], []
 
 
 def apply(names):
+    global _journal
     core()
+    strict = os.environ.get("STRICT_FEATURES", "0") == "1"
 
     def run(n):
-        if n in _done:
-            return
+        global _journal
+        if n in APPLIED or any(n == s[0] for s in SKIPPED):
+            return n in APPLIED
         if n not in FEATURES:
             sys.exit("Unknown feature '%s'. Known: %s" % (n, ", ".join(FEATURES)))
         for d in DEPENDS.get(n, []):
-            run(d)
+            if not run(d):
+                SKIPPED.append((n, "needs %s, which was skipped" % d))
+                print("SKIPPED feature %s: needs %s" % (n, d))
+                return False
         print("feature:", n)
-        FEATURES[n]()
-        _done.add(n)
+        _journal = {}
+        try:
+            FEATURES[n]()
+        except PatchMismatch as e:
+            for p, text in _journal.items():
+                open(p, "w").write(text)
+            SKIPPED.append((n, str(e)))
+            print("SKIPPED feature %s (rolled back): %s" % (n, e))
+            if strict:
+                sys.exit("STRICT_FEATURES is on: stopping because %s was skipped" % n)
+            return False
+        finally:
+            _journal = None
+        APPLIED.append(n)
+        return True
 
     for n in names:
         run(n)
+    with open("ani_features_report.txt", "w") as f:
+        for n in APPLIED:
+            f.write("applied: %s\n" % n)
+        for n, why in SKIPPED:
+            f.write("skipped: %s (%s)\n" % (n, why))
