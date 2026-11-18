@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """
 ani_ci.py - Complete Android Vulkan Driver Build, Packaging, and GitHub Release Orchestrator
-Handles NDK setup, Mesa 26.3.0 libpoly geometry/tessellation compilation, AdrenoTools .zip
-packaging with meta.json, and automatic versioned GitHub Release publishing.
+Handles NDK setup, Mesa 26.3.0 geometry compilation, AdrenoTools .zip packaging with meta.json,
+and automatic versioned GitHub Release publishing.
 """
 import json
 import os
@@ -144,6 +144,7 @@ def build_and_publish():
     if build_dir.exists():
         shutil.rmtree(build_dir)
 
+    # Base meson arguments
     meson_cmd = [
         "meson",
         "setup",
@@ -166,12 +167,11 @@ def build_and_publish():
         "-Dzstd=disabled",
     ]
 
+    # Safely handle geometry flags without cross-compilation tool mixing errors
     if "geometry" in features:
-        log("Enabling libpoly compute geometry & tessellation flags in Meson...", "INFO")
+        log("Enabling safe geometry shader lowering options...", "INFO")
         meson_cmd.extend([
-            "-Dpoly=enabled",
-            "-Dmesa-clc=enabled",
-            "-Dinstall-mesa-clc=true",
+            "-Dpoly=true",
             "-Dspirv-tools=enabled",
         ])
 
@@ -241,4 +241,4 @@ def build_and_publish():
 
 if __name__ == "__main__":
     build_and_publish()
-        
+    
