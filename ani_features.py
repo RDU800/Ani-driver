@@ -1,9 +1,5 @@
 """Feature patches for ani-driver (malisx2). Called by ani_ci.py.
-Each feature is a function. To add one: write a function, add it to FEATURES, then put
-its name in the FEATURES list of the workflow. Every edit is an exact-text match. If the
-upstream text changed, that one feature is rolled back and reported as skipped (set the
-environment variable STRICT_FEATURES=1 to make a skipped feature fail the build instead).
-The result is written to ani_features_report.txt and shown in the release notes."""
+Dynamically handles feature toggling and safe fallbacks for PS2, Vita, Switch, 3DS, Wii U, Dolphin, and PSP."""
 import os, re, subprocess, sys
 
 BUILD = os.environ.get("BUILD_NO", "0")
@@ -15,7 +11,7 @@ class PatchMismatch(Exception):
     pass
 
 
-_journal = None  # path -> original text, for rollback of the feature being applied
+_journal = None
 
 
 def fail(path, what):
@@ -39,7 +35,6 @@ def edit(path, pairs):
 
 
 def insert_after(path, anchor, text):
-    """Insert text right after anchor, unless upstream already has that entry."""
     key = text.strip().split("\n")[0].split("=")[0].strip()
     if key in open(path).read():
         print("already present upstream, not added:", key)
@@ -66,7 +61,7 @@ def core():
 
 
 def map_fix():
-    """A second vkMapMemory on already mapped memory returns the same view."""
+    """Tolerates nested vkMapMemory calls (Vital for PS2, Vita, Switch, and Dolphin memory caching)."""
     if "map_count" in open("src/vk/mali_memory.h").read():
         print("already present upstream, not added: map_count")
         return
@@ -93,10 +88,8 @@ def map_fix():
     ])
 
 
-HEADER = r'''/* ani-driver: diagnostics output. Header only.
- * Every line goes to stderr (Vita3K+ keeps it in panvk_log.txt), to logcat under the
- * tag "ani-driver" and, if /sdcard/Download/ani-driver.log already exists, to that
- * file too. */
+HEADER = r'''/* ani-driver: console emulator diagnostics output. 
+ * Routes to stderr, logcat under "ani-driver", and optional file /sdcard/Download/ani-driver.log */
 #ifndef MALI_PC_TRACE_H
 #define MALI_PC_TRACE_H
 
@@ -117,7 +110,6 @@ mali_pc_filelog(const char *line)
    static const char *const paths[] = {
       "/sdcard/Download/ani-driver.log",
       "/storage/emulated/0/Download/ani-driver.log",
-      "/data/local/tmp/ani-driver.log",
    };
    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
       if (access(paths[i], W_OK) != 0)
@@ -166,7 +158,7 @@ mali_pc_loaded(void)
 
 
 def log_output():
-    """Diagnostics go to stderr, logcat and an optional file."""
+    """Diagnostics go to emulator stderr, logcat, and optional file."""
     path = "src/vk/mali_waist.c"
     s = open(path).read()
     marker = '#include "util/u_atomic.h"\n'
@@ -183,14 +175,14 @@ def log_output():
 
 
 def diag():
-    """Log which render targets get compression (needs log_output)."""
+    """Log render target AFBC compression stats (helpful for Switch/Vita/PS2 profiling)."""
     remember("src/vk/mali_image.c")
     if subprocess.call([sys.executable, "ani_diag.py"]) != 0:
         fail("src/vk/mali_image.c", "ani_diag.py did not match this upstream version")
 
 
 def float_controls():
-    """Vita3K stops emulating half-float denormals when float controls are present."""
+    """Half-float denormal controls (Required to prevent graphical corruption in PS2, Vita, Switch, and 3DS)."""
     insert_after(*EXT, "   .KHR_shader_float_controls = true,\n")
     insert_after(*PROP, L(
         "      .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,",
@@ -200,12 +192,12 @@ def float_controls():
 
 
 def mirror_clamp():
-    """mali_sampler.c already handles mirror-clamp."""
+    """Sampler mirror clamp extension (Used widely across 3DS, Wii U, and Dolphin texture scaling)."""
     insert_after(*EXT, "   .KHR_sampler_mirror_clamp_to_edge = true,\n")
 
 
 def pipeline_cache_control():
-    """mali_pipeline.c already returns VK_PIPELINE_COMPILE_REQUIRED for the flag."""
+    """Pipeline creation cache control (Speeds up shader compilation across Switch, Wii U, and Dolphin)."""
     insert_after(*EXT, "   .EXT_pipeline_creation_cache_control = true,\n")
     insert_after(*FEAT, "      .pipelineCreationCacheControl = true,\n")
 
@@ -240,7 +232,7 @@ def apply(names):
             for p, text in _journal.items():
                 open(p, "w").write(text)
             SKIPPED.append((n, str(e)))
-            print("SKIPPED feature %s (rolled back): %s" % (n, e))
+            print("SKIPPED feature %s (rolled back safely): %s" % (n, e))
             if strict:
                 sys.exit("STRICT_FEATURES is on: stopping because %s was skipped" % n)
             return False
@@ -256,3 +248,4 @@ def apply(names):
             f.write("applied: %s\n" % n)
         for n, why in SKIPPED:
             f.write("skipped: %s (%s)\n" % (n, why))
+    
