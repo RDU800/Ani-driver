@@ -1,76 +1,187 @@
 #!/usr/bin/env python3
 """
-ani_ci.py - Minimal Android Vulkan Driver Build Orchestrator
-Handles NDK setup, Meson upgrade, cross-file target definition, Mesa compilation, patching, and delegates packaging/publishing to ani_release.
+ani_ci.py - Final Unified Build & Release Orchestrator for ani-driver
+Pulls the armsx2-turnip fork (malisx2 branch), applies features, builds, verifies, and packages.
 """
-import os
-import pathlib
-import shutil
-import subprocess
-import urllib.request
-import zipfile
+import hashlib, json, os, re, shutil, subprocess, sys, zipfile
 
-import ani_patches
-import ani_features
-import ani_release
-from ani_diag import log, check_memory
+E = os.environ.get
+NAME = E("DRIVER_NAME", "ani-driver")
+SLUG = E("ZIP_SLUG", "ani-driver")
+BUILD_TYPE = E("BUILD_TYPE", "release")
+NDK_VERSION = E("NDK_VERSION", "28.2.13676358")
+FEATURES = [f.strip() for f in E("FEATURES", "").split(",") if f.strip()]
+ANDROID_HOME = E("ANDROID_HOME", "/usr/local/lib/android/sdk")
+SO = "build-android/src/libvulkan_malisx2.so"
+LIB = "libvulkan_malisx2.so"
+STAGES = ["number", "patch", "mesa", "tools", "build", "verify", "package", "publish"]
 
-MESA_REPO_URL = os.environ.get("MESA_REPO_URL", "https://github.com/bmdhacks/armsx2-turnip.git")
-MESA_REF = os.environ.get("MESA_REF", "malisx2")
+for p in ("~/.cargo/bin", "~/.local/bin"):
+    os.environ["PATH"] = os.path.expanduser(p) + os.pathsep + os.environ["PATH"]
 
 
-def run_cmd(cmd, cwd=None, env=None):
-    log(f"EXEC: {' '.join(str(c) for c in cmd)}")
+def run(cmd, **kw):
+    print("+", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True, **kw)
+
+
+def out(cmd):
+    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+
+
+def tc(tool):
+    return "%s/ndk/%s/toolchains/llvm/prebuilt/linux-x86_64/bin/%s" % (ANDROID_HOME, NDK_VERSION, tool)
+
+
+def next_build_no():
+    v = E("BUILD_NO", "auto")
+    if v != "auto":
+        return int(v)
     try:
-        subprocess.run(cmd, cwd=cwd, env=env, check=True)
-    except subprocess.CalledProcessError as e:
-        log(f"Command failed with exit code {e.returncode}", "ERROR")
-        build_dir = pathlib.Path.cwd() / "mesa" / "build-android-aarch64"
-        log_path = build_dir / "meson-logs" / "meson-log.txt"
-        if log_path.exists():
-            print("\n--- MESON LOG ERROR DUMP ---")
-            print(log_path.read_text(encoding="utf-8", errors="ignore")[-6000:])
-            print("--- END MESON LOG ---")
-        raise
+        tags = out(["gh", "release", "list", "--limit", "200", "--json", "tagName",
+                    "-q", ".[].tagName"]).split()
+    except Exception as e:
+        print("could not list releases (%s); using the run number" % e)
+        return int(E("GITHUB_RUN_NUMBER", "1"))
+    nums = [int(m.group(1)) for t in tags
+            for m in [re.match(re.escape(SLUG) + r"-build-(\d+)", t)] if m]
+    return max(nums, default=0) + 1
 
 
-def setup_ndk(ndk_version: str) -> pathlib.Path:
-    android_home = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT") or "/usr/local/lib/android/sdk"
-    ndk_dir = pathlib.Path(android_home) / "ndk" / ndk_version
-    if ndk_dir.exists():
-        log(f"Found pre-installed Android NDK at {ndk_dir}", "OK")
-        return ndk_dir
-
-    sdkmanager = pathlib.Path(android_home) / "cmdline-tools" / "latest" / "bin" / "sdkmanager"
-    if sdkmanager.exists():
-        log(f"Installing Android NDK {ndk_version} via sdkmanager...", "INFO")
-        run_cmd([str(sdkmanager), f"ndk;{ndk_version}"])
-        if ndk_dir.exists():
-            return ndk_dir
-
-    work_ndk = pathlib.Path.cwd() / "android-ndk-r28b"
-    if not work_ndk.exists():
-        zip_name = "android-ndk-r28b-linux.zip"
-        url = f"https://dl.google.com/android/repository/{zip_name}"
-        log(f"Downloading NDK from {url}...", "INFO")
-        urllib.request.urlretrieve(url, zip_name)
-        with zipfile.ZipFile(zip_name, "r") as zf:
-            zf.extractall(".")
-    return work_ndk
+def report():
+    applied, skipped = [], []
+    if os.path.exists("ani_features_report.txt"):
+        for line in open("ani_features_report.txt").read().splitlines():
+            kind, _, rest = line.partition(": ")
+            (applied if kind == "applied" else skipped).append(rest)
+    return applied, skipped
 
 
-def create_android_cross_file(ndk_dir: pathlib.Path, api_level: int = 29) -> pathlib.Path:
-    toolchain_bin = ndk_dir / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin"
-    cross_file = pathlib.Path.cwd() / "android-aarch64-cross.ini"
+def stage_patch(n):
+    os.environ["BUILD_NO"] = str(n)
+    sys.path.insert(0, os.getcwd())
+    import ani_features
+    ani_features.apply(FEATURES)
 
-    content = f"""[binaries]
-ar = '{toolchain_bin}/llvm-ar'
-c = '{toolchain_bin}/aarch64-linux-android{api_level}-clang'
-cpp = '{toolchain_bin}/aarch64-linux-android{api_level}-clang++'
-c_ld = 'lld'
-cpp_ld = 'lld'
-strip = '{toolchain_bin}/llvm-strip'
-pkg-config = '/usr/bin/pkg-config'
 
-[built-in options]
+def stage_mesa(n):
+    if os.path.isdir("mesa/.git"):
+        return
+    # Use armsx2-turnip malisx2 branch directly
+    run(["git", "clone", "--depth", "1", "--branch", "malisx2", 
+         "https://github.com/bmdhacks/armsx2-turnip.git", "mesa"])
+
+
+def stage_tools(n):
+    run(["sudo", "apt-get", "update"])
+    run(["sudo", "apt-get", "install", "-y", "ninja-build", "libclang-dev", "clang", "python3-pip", "zip"])
+    # Pin stable Meson version to avoid bleeding-edge cross-compilation strictness
+    run(["pip", "install", "--break-system-packages", "meson==1.4.0", "mako", "pyyaml"])
+    run(["rustup", "update", "stable"])
+    run(["rustup", "target", "add", "aarch64-linux-android"])
+    if not os.path.exists(os.path.expanduser("~/.cargo/bin/bindgen")):
+        run(["cargo", "install", "bindgen-cli", "--version", "0.71.1", "--locked"])
+    if not os.path.isdir("%s/ndk/%s" % (ANDROID_HOME, NDK_VERSION)):
+        run(["bash", "-c", 'yes | "%s/cmdline-tools/latest/bin/sdkmanager" "ndk;%s" >/dev/null'
+             % (ANDROID_HOME, NDK_VERSION)])
+
+
+def stage_build(n):
+    ndk = "%s/ndk/%s" % (ANDROID_HOME, NDK_VERSION)
+    cross_path = "cross/android-aarch64.ini"
+    if not os.path.exists(cross_path):
+        cross_path = "android-aarch64-cross.ini"
     
+    if os.path.exists(cross_path):
+        cross = open(cross_path).read()
+        cross = re.sub(r"(?m)^ndk = .*$", "ndk = '%s'" % ndk, cross)
+        open("cross-ci.ini", "w").write(cross)
+        cross_file = "cross-ci.ini"
+    else:
+        cross_file = cross_path
+
+    run(["meson", "setup", "build-android", "mesa", "--cross-file", cross_file, "--buildtype=" + BUILD_TYPE,
+         "-Dplatforms=android", "-Dplatform-sdk-version=29", "-Dandroid-stub=true",
+         "-Dgallium-drivers=", "-Dvulkan-drivers=panfrost", "-Dallow-fallback-for=libdrm",
+         "-Degl=disabled", "-Dgles1=disabled", "-Dgles2=disabled", "-Dglx=disabled",
+         "-Dllvm=disabled", "-Dshared-llvm=disabled", "-Dshader-cache=enabled", "-Dzstd=disabled"])
+    run(["ninja", "-C", "build-android"])
+
+
+def stage_verify(n):
+    bad = []
+    if not os.path.isfile(SO):
+        sys.exit("FAIL: %s not found" % SO)
+    if "AArch64" not in out([tc("llvm-readelf"), "-h", SO]):
+        bad.append("not an AArch64 library")
+    needed = re.findall(r"Shared library: \[(.*?)\]", out([tc("llvm-readelf"), "-d", SO]))
+    print("needed libraries:", needed)
+    bad += ["unexpected dependency " + l for l in needed
+            if l not in ("liblog.so", "libm.so", "libdl.so", "libc.so")]
+    exports = out([tc("llvm-nm"), "-D", "--defined-only", SO]).split()
+    for sym in ("HMI", "vk_icdGetInstanceProcAddr", "vk_icdGetPhysicalDeviceProcAddr",
+                "vk_icdNegotiateLoaderICDInterfaceVersion"):
+        if sym not in exports:
+            bad.append("missing export " + sym)
+    if ("ani-driver-build%d" % n).encode() not in open(SO, "rb").read():
+        bad.append("build label missing")
+    if bad:
+        sys.exit("VERIFY FAILED: " + "; ".join(bad))
+    print("VERIFY OK")
+
+
+def zip_name(n):
+    return "%s-build-%d.zip" % (SLUG, n)
+
+
+def stage_package(n):
+    os.makedirs("out", exist_ok=True)
+    run([tc("llvm-strip"), "-o", "out/" + LIB, SO])
+    meta = {"schemaVersion": 1, "name": "%s build %d" % (NAME, n),
+            "description": "%s build %d: malisx2-based Vulkan driver for Mali G52 (kbase), for emulators" % (NAME, n),
+            "author": NAME + " (fork of malisx2 by bmdhacks)", "packageVersion": str(n),
+            "vendor": NAME, "driverVersion": "44.1.0", "minApi": 29, "libraryName": LIB}
+    json.dump(meta, open("out/meta.json", "w"), indent=2)
+    with zipfile.ZipFile(zip_name(n), "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.write("out/" + LIB, LIB)
+        z.write("out/meta.json", "meta.json")
+    digest = hashlib.sha256(open(zip_name(n), "rb").read()).hexdigest()
+    open("SHA256SUMS.txt", "w").write("%s  %s\n" % (digest, zip_name(n)))
+    size = os.path.getsize(zip_name(n)) / 1048576
+    applied, skipped = report()
+    summary = ["## %s build %d (%s)" % (NAME, n, BUILD_TYPE), "",
+               "- zip: `%s` (%.1f MB)" % (zip_name(n), size), "- sha256: `%s`" % digest,
+               "- features applied: " + (", ".join(applied) or "none"),
+               "- features skipped: " + ("; ".join(skipped) or "none"), "- library check passed"]
+    print("\n".join(summary))
+    if E("GITHUB_STEP_SUMMARY"):
+        open(E("GITHUB_STEP_SUMMARY"), "a").write("\n".join(summary) + "\n")
+
+
+def stage_publish(n):
+    tag = "%s-build-%d-run%s" % (SLUG, n, E("GITHUB_RUN_NUMBER", "0"))
+    applied, skipped = report()
+    notes = "%s build %d (%s build). Features applied: %s. Skipped: %s. Commit %s." % (
+        NAME, n, BUILD_TYPE, ", ".join(applied) or "none", "; ".join(skipped) or "none",
+        E("GITHUB_SHA", "?"))
+    run(["gh", "release", "create", tag, zip_name(n), "SHA256SUMS.txt", "--prerelease",
+         "--title", "%s build %d" % (NAME, n), "--notes", notes])
+
+
+def main():
+    wanted = sys.argv[1:] or STAGES
+    for w in wanted:
+        if w not in STAGES:
+            sys.exit("Unknown stage '%s'. Stages: %s" % (w, " ".join(STAGES)))
+    n = next_build_no()
+    print("::notice::%s build %d" % (NAME, n))
+    for s in STAGES:
+        if s in wanted and s != "number":
+            print("::group::" + s, flush=True)
+            globals()["stage_" + s](n)
+            print("::endgroup::", flush=True)
+
+
+if __name__ == "__main__":
+    main()
+        
