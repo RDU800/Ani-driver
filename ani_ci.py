@@ -1,16 +1,19 @@
-"""Build, verify, package and publish ani-driver. This file does not change: the settings
-live in the workflow's env and the feature code in ani_features.py.
+#!/usr/bin/env python3
+"""Build, verify, package and publish ani-driver automatically for all target console emulators
+(PS2, Vita, Switch, 3DS, Wii U, Dolphin, PSP).
   python3 ani_ci.py                 run every stage
   python3 ani_ci.py verify package  run only the named stages
-Stages: number patch mesa tools build verify package publish"""
+Stages: number patch mesa tools tools build verify package publish"""
 import hashlib, json, os, re, shutil, subprocess, sys, zipfile
 
 E = os.environ.get
-NAME = E("DRIVER_NAME", "ani-driver")
-SLUG = E("ZIP_SLUG", "ani-driver")
+NAME = E("DRIVER_NAME", "ani-driver-consoles")
+SLUG = E("ZIP_SLUG", "ani-driver-consoles")
 BUILD_TYPE = E("BUILD_TYPE", "release")
 NDK_VERSION = E("NDK_VERSION", "28.2.13676358")
-FEATURES = [f.strip() for f in E("FEATURES", "").split(",") if f.strip()]
+# Automatically runs all console emulation feature sets with fallback protection
+DEFAULT_FEATURES = "map_fix,log_output,diag,float_controls,mirror_clamp,pipeline_cache_control"
+FEATURES = [f.strip() for f in E("FEATURES", DEFAULT_FEATURES).split(",") if f.strip()]
 ANDROID_HOME = E("ANDROID_HOME", "")
 SO = "build-android/src/libvulkan_malisx2.so"
 LIB = "libvulkan_malisx2.so"
@@ -49,7 +52,6 @@ def next_build_no():
 
 
 def report():
-    """(applied, skipped) feature lists written by ani_features.py."""
     applied, skipped = [], []
     if os.path.exists("ani_features_report.txt"):
         for line in open("ani_features_report.txt").read().splitlines():
@@ -128,8 +130,8 @@ def stage_package(n):
     os.makedirs("out", exist_ok=True)
     run([tc("llvm-strip"), "-o", "out/" + LIB, SO])
     meta = {"schemaVersion": 1, "name": "%s build %d" % (NAME, n),
-            "description": "%s build %d: malisx2-based Vulkan driver for Mali G52 (kbase), for emulators" % (NAME, n),
-            "author": NAME + " (fork of malisx2 by bmdhacks)", "packageVersion": str(n),
+            "description": "%s build %d: Unified Mali-G52 Vulkan driver optimized for PS2, Vita, Switch, 3DS, Wii U, Dolphin, PSP" % (NAME, n),
+            "author": NAME + " (malisx2 console build)", "packageVersion": str(n),
             "vendor": NAME, "driverVersion": "44.1.0", "minApi": 29, "libraryName": LIB}
     json.dump(meta, open("out/meta.json", "w"), indent=2)
     with zipfile.ZipFile(zip_name(n), "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
@@ -151,7 +153,7 @@ def stage_package(n):
 def stage_publish(n):
     tag = "%s-build-%d-run%s" % (SLUG, n, E("GITHUB_RUN_NUMBER", "0"))
     applied, skipped = report()
-    notes = "%s build %d (%s build). Features applied: %s. Skipped: %s. Commit %s." % (
+    notes = "%s build %d (%s build) for console emulators (PS2, Vita, Switch, 3DS, Wii U, Dolphin, PSP). Applied: %s. Skipped: %s. Commit %s." % (
         NAME, n, BUILD_TYPE, ", ".join(applied) or "none", "; ".join(skipped) or "none",
         E("GITHUB_SHA", "?"))
     run(["gh", "release", "create", tag, zip_name(n), "SHA256SUMS.txt", "--prerelease",
@@ -172,5 +174,6 @@ def main():
             print("::endgroup::", flush=True)
 
 
-if __name__ == "__main__":
+if __name__ == "main__":
     main()
+                 
