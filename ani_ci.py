@@ -73,8 +73,8 @@ strip = '{toolchain_bin}/llvm-strip'
 pkg-config = '/usr/bin/pkg-config'
 
 [built-in options]
-c_args = ['--target=aarch64-linux-android{api_level}']
-cpp_args = ['--target=aarch64-linux-android{api_level}']
+c_args = ['--target=aarch64-linux-android{api_level}', '-Wno-unknown-warning-option']
+cpp_args = ['--target=aarch64-linux-android{api_level}', '-Wno-unknown-warning-option']
 c_link_args = ['--target=aarch64-linux-android{api_level}']
 cpp_link_args = ['--target=aarch64-linux-android{api_level}']
 
