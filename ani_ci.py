@@ -16,7 +16,7 @@ import ani_release
 from ani_diag import log, check_memory
 
 MESA_REPO_URL = os.environ.get("MESA_REPO_URL", "https://gitlab.freedesktop.org/mesa/mesa.git")
-MESA_REF = os.environ.get("MESA_REF", "mesa-26.3.0")
+MESA_REF = os.environ.get("MESA_REF", "mesa-25.2.8")
 
 
 def run_cmd(cmd, cwd=None, env=None):
@@ -73,8 +73,8 @@ strip = '{toolchain_bin}/llvm-strip'
 pkg-config = '/usr/bin/pkg-config'
 
 [built-in options]
-c_args = ['--target=aarch64-linux-android{api_level}', '-Wno-unknown-warning-option']
-cpp_args = ['--target=aarch64-linux-android{api_level}', '-Wno-unknown-warning-option']
+c_args = ['--target=aarch64-linux-android{api_level}']
+cpp_args = ['--target=aarch64-linux-android{api_level}']
 c_link_args = ['--target=aarch64-linux-android{api_level}']
 cpp_link_args = ['--target=aarch64-linux-android{api_level}']
 
@@ -102,9 +102,9 @@ def main():
     log("=== STARTING ANI-DRIVER BUILD PIPELINE ===")
     check_memory()
 
-    # Ensure Meson meets Mesa 26.3.0 requirement (>= 1.5.0)
-    log("Upgrading Meson to satisfy Mesa requirements...", "INFO")
-    run_cmd(["pip", "install", "--upgrade", "meson"])
+    # Ensure stable Meson version without bleeding-edge strictness
+    log("Installing stable Meson version...", "INFO")
+    run_cmd(["pip", "install", "--upgrade", "meson==1.4.0"])
 
     build_type = os.environ.get("BUILD_TYPE", "release")
     ndk_version = os.environ.get("NDK_VERSION", "28.2.13676358")
@@ -172,4 +172,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
