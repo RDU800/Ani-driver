@@ -248,4 +248,3 @@ def apply(names):
             f.write("applied: %s\n" % n)
         for n, why in SKIPPED:
             f.write("skipped: %s (%s)\n" % (n, why))
-    
