@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-ani_ci.py - Complete Android Vulkan Driver Build, Packaging, and GitHub Release Orchestrator
-Handles NDK setup, Mesa 26.3.0 compilation with feature patches, AdrenoTools .zip packaging with meta.json,
-and automatic versioned GitHub Release publishing.
+ani_ci.py - Minimal Android Vulkan Driver Build Orchestrator
+Handles NDK setup, Mesa compilation, patching, and delegates packaging/publishing to ani_release.
 """
-import json
 import os
 import pathlib
-import re
 import shutil
 import subprocess
-import sys
 import urllib.request
 import zipfile
 
 import ani_patches
 import ani_features
+import ani_release
 from ani_diag import log, check_memory
 
 MESA_REPO_URL = os.environ.get("MESA_REPO_URL", "https://gitlab.freedesktop.org/mesa/mesa.git")
@@ -25,39 +22,6 @@ MESA_REF = os.environ.get("MESA_REF", "mesa-26.3.0")
 def run_cmd(cmd, cwd=None, env=None):
     log(f"EXEC: {' '.join(str(c) for c in cmd)}")
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
-
-
-def get_next_build_number(zip_slug: str, build_no_env: str) -> int:
-    if build_no_env.strip().lower() != "auto":
-        return int(build_no_env)
-
-    max_num = 0
-    try:
-        out = subprocess.check_output(["git", "tag", "--list"], text=True)
-        for line in out.splitlines():
-            m = re.search(r"(\d+)$", line.strip())
-            if m:
-                max_num = max(max_num, int(m.group(1)))
-    except Exception as e:
-        log(f"Git tag lookup fallback: {e}", "WARN")
-
-    try:
-        out = subprocess.check_output(
-            ["gh", "release", "list", "--limit", "50", "--json", "tagName"],
-            text=True,
-        )
-        releases = json.loads(out)
-        for r in releases:
-            tag = r.get("tagName", "")
-            m = re.search(r"(\d+)$", tag)
-            if m:
-                max_num = max(max_num, int(m.group(1)))
-    except Exception as e:
-        log(f"GH release lookup note: {e}", "INFO")
-
-    next_num = max_num + 1
-    log(f"Auto-resolved next driver build version: #{next_num}", "INFO")
-    return next_num
 
 
 def setup_ndk(ndk_version: str) -> pathlib.Path:
@@ -109,21 +73,14 @@ endian = 'little'
     return cross_file
 
 
-def build_and_publish():
-    log("=== STARTING ANI-DRIVER FULL BUILD, ZIP & RELEASE PIPELINE ===")
+def main():
+    log("=== STARTING ANI-DRIVER BUILD PIPELINE ===")
     check_memory()
 
-    driver_name = os.environ.get("DRIVER_NAME", "ani-driver")
-    zip_slug = os.environ.get("ZIP_SLUG", "ani-driver")
-    build_no_env = os.environ.get("BUILD_NO", "auto")
     build_type = os.environ.get("BUILD_TYPE", "release")
     ndk_version = os.environ.get("NDK_VERSION", "28.2.13676358")
     features_raw = os.environ.get("FEATURES", "")
     features = [f.strip() for f in features_raw.split(",") if f.strip()]
-
-    build_num = get_next_build_number(zip_slug, build_no_env)
-    version_tag = f"v{build_num}"
-    zip_filename = f"{zip_slug}-{build_num}-{build_type}.zip"
 
     # 1. Configure features & clone/patch Mesa
     ani_features.configure_features()
@@ -177,58 +134,12 @@ def build_and_publish():
         raise FileNotFoundError("Compiled Vulkan .so library not found in build output!")
 
     compiled_so = so_candidates[0]
-    target_so_name = "vulkan.panfrost.so"
     log(f"Found compiled driver binary: {compiled_so}", "OK")
 
-    # 4. Package AdrenoTools / Emulator compatible .zip with meta.json
-    pkg_dir = pathlib.Path.cwd() / "driver_pkg"
-    if pkg_dir.exists():
-        shutil.rmtree(pkg_dir)
-    pkg_dir.mkdir(parents=True)
-
-    shutil.copy2(compiled_so, pkg_dir / target_so_name)
-
-    meta_data = {
-        "schemaVersion": 1,
-        "name": f"{driver_name} #{build_num}",
-        "description": f"Custom PanVK Mali Vulkan Driver ({MESA_REF}) | Features: {', '.join(features)}",
-        "author": "ani-driver",
-        "packageVersion": str(build_num),
-        "vendor": "ARM (PanVK)",
-        "driverVersion": f"{MESA_REF}-{build_num}",
-        "minApi": 29,
-        "libraryName": target_so_name,
-    }
-    (pkg_dir / "meta.json").write_text(json.dumps(meta_data, indent=2) + "\n", encoding="utf-8")
-
-    output_zip = pathlib.Path.cwd() / zip_filename
-    with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(pkg_dir / target_so_name, target_so_name)
-        zf.write(pkg_dir / "meta.json", "meta.json")
-
-    log(f"Successfully packaged driver archive: {output_zip} ({output_zip.stat().st_size} bytes)", "DONE")
-
-    # 5. Publish GitHub Release automatically with auto-versioned tag
-    if os.environ.get("GH_TOKEN"):
-        release_title = f"{driver_name} #{build_num} ({MESA_REF})"
-        release_notes = (
-            f"### {driver_name} Build #{build_num}\n\n"
-            f"- **Mesa Base:** `{MESA_REF}`\n"
-            f"- **Build Type:** `{build_type}`\n"
-            f"- **Enabled Features:** `{', '.join(features)}`\n"
-            f"- **Package:** `{zip_filename}`\n"
-        )
-        log(f"Publishing GitHub Release {version_tag}...", "INFO")
-        run_cmd([
-            "gh", "release", "create", version_tag,
-            str(output_zip),
-            "--title", release_title,
-            "--notes", release_notes,
-        ])
-        log(f"Published GitHub Release {version_tag} with {zip_filename}!", "DONE")
-    else:
-        log("GH_TOKEN not set; skipping GitHub Release upload.", "WARN")
+    # 4. Delegate to static release layer
+    ani_release.package_and_publish(compiled_so, MESA_REF, features)
 
 
 if __name__ == "__main__":
-    build_and_publish()
+    main()
+        
