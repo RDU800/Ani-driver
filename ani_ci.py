@@ -48,6 +48,16 @@ def next_build_no():
     return max(nums, default=0) + 1
 
 
+def report():
+    """(applied, skipped) feature lists written by ani_features.py."""
+    applied, skipped = [], []
+    if os.path.exists("ani_features_report.txt"):
+        for line in open("ani_features_report.txt").read().splitlines():
+            kind, _, rest = line.partition(": ")
+            (applied if kind == "applied" else skipped).append(rest)
+    return applied, skipped
+
+
 def stage_patch(n):
     os.environ["BUILD_NO"] = str(n)
     sys.path.insert(0, os.getcwd())
@@ -128,9 +138,11 @@ def stage_package(n):
     digest = hashlib.sha256(open(zip_name(n), "rb").read()).hexdigest()
     open("SHA256SUMS.txt", "w").write("%s  %s\n" % (digest, zip_name(n)))
     size = os.path.getsize(zip_name(n)) / 1048576
+    applied, skipped = report()
     summary = ["## %s build %d (%s)" % (NAME, n, BUILD_TYPE), "",
                "- zip: `%s` (%.1f MB)" % (zip_name(n), size), "- sha256: `%s`" % digest,
-               "- features: " + (", ".join(FEATURES) or "none"), "- library check passed"]
+               "- features applied: " + (", ".join(applied) or "none"),
+               "- features skipped: " + ("; ".join(skipped) or "none"), "- library check passed"]
     print("\n".join(summary))
     if E("GITHUB_STEP_SUMMARY"):
         open(E("GITHUB_STEP_SUMMARY"), "a").write("\n".join(summary) + "\n")
@@ -138,8 +150,10 @@ def stage_package(n):
 
 def stage_publish(n):
     tag = "%s-build-%d-run%s" % (SLUG, n, E("GITHUB_RUN_NUMBER", "0"))
-    notes = "%s build %d (%s build). Features: %s. Commit %s." % (
-        NAME, n, BUILD_TYPE, ", ".join(FEATURES) or "none", E("GITHUB_SHA", "?"))
+    applied, skipped = report()
+    notes = "%s build %d (%s build). Features applied: %s. Skipped: %s. Commit %s." % (
+        NAME, n, BUILD_TYPE, ", ".join(applied) or "none", "; ".join(skipped) or "none",
+        E("GITHUB_SHA", "?"))
     run(["gh", "release", "create", tag, zip_name(n), "SHA256SUMS.txt", "--prerelease",
          "--title", "%s build %d" % (NAME, n), "--notes", notes])
 
