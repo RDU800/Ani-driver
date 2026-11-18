@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ani_ci.py - Minimal Android Vulkan Driver Build Orchestrator
-Handles NDK setup, Meson upgrade, Mesa compilation, patching, and delegates packaging/publishing to ani_release.
+Handles NDK setup, Meson upgrade, cross-file target definition, Mesa compilation, patching, and delegates packaging/publishing to ani_release.
 """
 import os
 import pathlib
@@ -71,6 +71,10 @@ c_ld = 'lld'
 cpp_ld = 'lld'
 strip = '{toolchain_bin}/llvm-strip'
 pkg-config = '/usr/bin/pkg-config'
+
+[built-in options]
+c_args = ['--target=aarch64-linux-android{api_level}']
+cpp_args = ['--target=aarch64-linux-android{api_level}']
 
 [host_machine]
 system = 'android'
@@ -156,4 +160,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+                       
