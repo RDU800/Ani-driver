@@ -14,7 +14,7 @@ env:
   BUILD_NO: "auto"
   BUILD_TYPE: "release"
   NDK_VERSION: 28.2.13676358
-  FEATURES: "map_fix,log_output,diag,float_controls,mirror_clamp,pipeline_cache_control,geometry"
+  FEATURES: "map_fix,log_output,diag,float_controls,mirror_clamp,pipeline_cache_control"
 
 jobs:
   android:
