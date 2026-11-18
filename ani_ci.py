@@ -76,6 +76,9 @@ pkg-config = '/usr/bin/pkg-config'
 c_args = ['--target=aarch64-linux-android{api_level}']
 cpp_args = ['--target=aarch64-linux-android{api_level}']
 
+[properties]
+needs_exe_wrapper = true
+
 [host_machine]
 system = 'android'
 cpu_family = 'aarch64'
@@ -160,4 +163,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                       
+        
