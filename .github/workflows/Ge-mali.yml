@@ -1,27 +1,18 @@
-name: build-ani-driver
+name: Build Android Vulkan Driver (malisx2)
 
 on:
-  workflow_dispatch: {}
-
-permissions:
-  contents: write
-
-# The settings you change live here. The mechanics live in ani_ci.py (never changes) and
-# the feature code in ani_features.py. Remove a name from FEATURES to leave it out.
-env:
-  DRIVER_NAME: "ani-driver"
-  ZIP_SLUG: "ani-driver"
-  BUILD_NO: "auto"
-  BUILD_TYPE: "release"
-  NDK_VERSION: 28.2.13676358
-  FEATURES: "map_fix,log_output,diag,float_controls,mirror_clamp,pipeline_cache_control"
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
 
 jobs:
   android:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -29,16 +20,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/bindgen
-          key: bindgen-0.71.1-${{ runner.os }}
+          key: bindgen-0.71.1-Linux
 
-      - name: Install Host Prerequisite Tools for Libpoly Geometry
+      - name: Install Host Prerequisite Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y meson ninja-build glslang-tools spirv-tools libclc-18-dev llvm-dev
 
       - name: Build, verify and publish
+        run: python3 -u ani_ci.py
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 ani_ci.py
-
-# end of file
+          DRIVER_NAME: ani-driver
+          ZIP_SLUG: ani-driver
+          BUILD_TYPE: release
+          NDK_VERSION: 28.2.13676358
+          FEATURES: map_fix,log_output,diag,float_controls,mirror_clamp,pipeline_cache_control
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
