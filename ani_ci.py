@@ -159,8 +159,7 @@ def stage_build(n):
         "-Dgles1=disabled",
         "-Dgles2=disabled",
         "-Dglx=disabled",
-        "-Dllvm=enabled",
-        "-Dshared-llvm=disabled",
+        "-Dllvm=disabled",
         "-Dshader-cache=enabled",
         "-Dzstd=disabled",
     ])
@@ -181,97 +180,5 @@ def stage_verify(n):
         if l not in ("liblog.so", "libm.so", "libdl.so", "libc.so")
     ]
     exports = out([tc("llvm-nm"), "-D", "--defined-only", SO]).split()
-    for sym in (
-        "HMI",
-        "vk_icdGetInstanceProcAddr",
-        "vk_icdGetPhysicalDeviceProcAddr",
-        "vk_icdNegotiateLoaderICDInterfaceVersion",
-    ):
-        if sym not in exports:
-            bad.append("missing export " + sym)
-    if ("ani-driver-build%d" % n).encode() not in open(SO, "rb").read():
-        bad.append("build label missing")
-    if bad:
-        sys.exit("VERIFY FAILED: " + "; ".join(bad))
-    print("VERIFY OK", flush=True)
-
-
-def zip_name(n):
-    return "%s-build-%d.zip" % (SLUG, n)
-
-
-def stage_package(n):
-    os.makedirs("out", exist_ok=True)
-    run([tc("llvm-strip"), "-o", "out/" + LIB, SO])
-    meta = {
-        "schemaVersion": 1,
-        "name": "%s build %d" % (NAME, n),
-        "description": "%s build %d: malisx2-based Vulkan driver for Mali G52 (kbase), for emulators" % (NAME, n),
-        "author": NAME + " (fork of malisx2 by bmdhacks)",
-        "packageVersion": str(n),
-        "vendor": NAME,
-        "driverVersion": "44.1.0",
-        "minApi": 29,
-        "libraryName": LIB,
-    }
-    json.dump(meta, open("out/meta.json", "w"), indent=2)
-    with zipfile.ZipFile(zip_name(n), "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        z.write("out/" + LIB, LIB)
-        z.write("out/meta.json", "meta.json")
-    digest = hashlib.sha256(open(zip_name(n), "rb").read()).hexdigest()
-    open("SHA256SUMS.txt", "w").write("%s  %s\n" % (digest, zip_name(n)))
-    size = os.path.getsize(zip_name(n)) / 1048576
-    applied, skipped = report()
-    summary = [
-        "## %s build %d (%s)" % (NAME, n, BUILD_TYPE),
-        "",
-        "- zip: `%s` (%.1f MB)" % (zip_name(n), size),
-        "- sha256: `%s`" % digest,
-        "- features applied: " + (", ".join(applied) or "none"),
-        "- features skipped: " + ("; ".join(skipped) or "none"),
-        "- library check passed",
-    ]
-    print("\n".join(summary), flush=True)
-    if E("GITHUB_STEP_SUMMARY"):
-        open(E("GITHUB_STEP_SUMMARY"), "a").write("\n".join(summary) + "\n")
-
-
-def stage_publish(n):
-    tag = "%s-build-%d-run%s" % (SLUG, n, E("GITHUB_RUN_NUMBER", "0"))
-    applied, skipped = report()
-    notes = (
-        "%s build %d (%s build). Features applied: %s. Skipped: %s. Commit %s."
-        % (
-            NAME,
-            n,
-            BUILD_TYPE,
-            ", ".join(applied) or "none",
-            "; ".join(skipped) or "none",
-            E("GITHUB_SHA", "?"),
-        )
-    )
-    run([
-        "gh", "release", "create", tag, zip_name(n), "SHA256SUMS.txt",
-        "--prerelease",
-        "--title", "%s build %d" % (NAME, n),
-        "--notes", notes,
-    ])
-
-
-def main():
-    wanted = sys.argv[1:] or STAGES
-    for w in wanted:
-        if w not in STAGES:
-            sys.exit("Unknown stage '%s'. Stages: %s" % (w, " ".join(STAGES)))
-    n = next_build_no()
-    print("::notice::%s build %d" % (NAME, n), flush=True)
-    for s in STAGES:
-        if s in wanted and s != "number":
-            print("::group::" + s, flush=True)
-            globals()["stage_" + s](n)
-            print("::endgroup::", flush=True)
-
-
-if __name__ == "__main__":
-    main()
-        
+    for
+    
