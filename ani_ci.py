@@ -159,7 +159,7 @@ def stage_build(n):
         "-Dgles1=disabled",
         "-Dgles2=disabled",
         "-Dglx=disabled",
-        "-Dllvm=disabled",
+        "-Dllvm=enabled",
         "-Dshared-llvm=disabled",
         "-Dshader-cache=enabled",
         "-Dzstd=disabled",
