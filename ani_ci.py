@@ -117,7 +117,7 @@ def stage_tools(n):
         "sudo", "apt-get", "install", "-y",
         "ninja-build", "libclang-dev", "clang", "python3-pip", "zip"
     ])
-    run(["pip", "install", "--break-system-packages", "meson==1.4.0", "mako", "pyyaml"])
+    run(["pip", "install", "--break-system-packages", "meson==1.7.0", "mako", "pyyaml"])
     run(["rustup", "update", "stable"])
     run(["rustup", "target", "add", "aarch64-linux-android"])
     if not os.path.exists(os.path.expanduser("~/.cargo/bin/bindgen")):
