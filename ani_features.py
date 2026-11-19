@@ -210,8 +210,14 @@ def pipeline_cache_control():
     insert_after(*FEAT, "      .pipelineCreationCacheControl = true,\n")
 
 
+def geometry_shader():
+    """Expose geometryShader feature in vk_features."""
+    insert_after(*FEAT, "      .geometryShader = true,\n")
+
+
 FEATURES = {f.__name__: f for f in
-            (map_fix, log_output, diag, float_controls, mirror_clamp, pipeline_cache_control)}
+            (map_fix, log_output, diag, float_controls, mirror_clamp, pipeline_cache_control,
+             geometry_shader)}
 DEPENDS = {"diag": ["log_output"]}
 APPLIED, SKIPPED = [], []
 
